@@ -3,14 +3,11 @@
   if (!form) return;
   const serviceOptions = document.querySelector('#service-options');
   const quoteReference = form.elements.quoteReference;
-  const agreedPrice = form.elements.agreedPrice;
   const email = form.elements.email;
   const name = form.elements.name;
   const consent = document.querySelector('#payment-consent');
   const applyButton = document.querySelector('#apply-quote');
   const quoteStatus = document.querySelector('#quote-status');
-  const quoteCurrency = document.querySelector('#quote-currency');
-  const currencySymbol = document.querySelector('#currency-symbol');
   const amountDue = document.querySelector('#summary-amount');
   const payButton = document.querySelector('#pay-button');
   const errorBox = document.querySelector('#checkout-error');
@@ -29,30 +26,19 @@
     'digital-products': '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18m-12 0v11"/>',
     'research-prototyping': '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5m-10-14v7m-3.5-3.5h7"/>'
   };
-  function minorFor(value, currency) {
-    if (!value || !/^\d+(?:\.\d{1,3})?$/.test(String(value))) return null;
-    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
-    const [whole, fraction = ''] = String(value).split('.');
-    if (fraction.length > digits) return null;
-    const minor = Number(whole) * (10 ** digits) + Number((fraction + '0'.repeat(digits)).slice(0, digits) || 0);
-    return Number.isSafeInteger(minor) ? minor : null;
-  }
   function money(minor, currency) {
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
     return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(minor / (10 ** digits));
   }
-  function symbol(currency) {
-    try { return new Intl.NumberFormat(undefined, { style: 'currency', currency }).formatToParts(0).find(part => part.type === 'currency')?.value || currency; }
-    catch { return currency; }
-  }
   function updateControls() {
     const selected = services.find(service => service.id === selectedServiceId);
     document.querySelector('#to-quote').disabled = !selected;
-    const priceMatches = activeQuote && minorFor(agreedPrice.value, activeQuote.currency) === activeQuote.amountMinor;
-    const quoteMatches = activeQuote && selected?.id === activeQuote.serviceId && email.value.trim().toLowerCase() === activeQuote.customerEmail && priceMatches;
+    const quoteMatches = activeQuote && selected?.id === activeQuote.serviceId;
     document.querySelector('#to-confirm').disabled = !quoteMatches;
-    payButton.disabled = !(name.value.trim().length >= 2 && consent.checked && quoteMatches);
+    const emailValid = activeQuote?.requiresEmail ? email.checkValidity() && email.value.trim() : true;
+    payButton.disabled = !(consent.checked && quoteMatches && emailValid);
     if (activeQuote) amountDue.textContent = money(activeQuote.amountMinor, activeQuote.currency);
+    if (activeQuote && currentStage === 3 && activeQuote.requiresEmail) document.querySelector('#summary-email').textContent = email.value.trim() || 'Email required for receipt';
   }
   function goTo(step) {
     if (step > currentStage && step === 2 && !selectedServiceId) return;
@@ -65,8 +51,10 @@
     document.querySelector('#progress-fill').style.width = `${((step - 1) / 2) * 100}%`;
     if (step === 3) {
       document.querySelector('#summary-service').textContent = activeQuote?.serviceName || '—';
-      document.querySelector('#summary-email').textContent = email.value.trim();
+      document.querySelector('#summary-email').textContent = activeQuote?.requiresEmail ? (email.value.trim() || 'Email required for receipt') : 'Email provided with quote';
       document.querySelector('#summary-amount').textContent = activeQuote ? money(activeQuote.amountMinor, activeQuote.currency) : '—';
+      document.querySelector('#checkout-email-field').hidden = !activeQuote?.requiresEmail;
+      email.required = Boolean(activeQuote?.requiresEmail);
       confirmError.hidden = true;
     }
     updateControls();
@@ -93,24 +81,26 @@
       services = await response.json(); serviceOptions.replaceChildren(); services.forEach(renderService);
       if (!services.length) serviceOptions.innerHTML = '<p class="service-loading">No services found. Contact info@netrue.io for a quote.</p>';
       const quoteFromLink = new URLSearchParams(location.search).get('quote');
-      if (quoteFromLink) { quoteReference.value = quoteFromLink; goTo(2); }
+      if (quoteFromLink) { quoteReference.value = quoteFromLink; goTo(2); await applyCurrentQuote(true); }
       updateControls();
     } catch (error) { serviceOptions.textContent = error.message; }
   }
-  async function applyCurrentQuote() {
+  async function applyCurrentQuote(fromLink = false) {
     errorBox.hidden = true;
-    const ref = quoteReference.value.trim(); const mail = email.value.trim().toLowerCase();
+    const ref = quoteReference.value.trim();
     if (!/^NTRQ-[A-F0-9]{12}$/i.test(ref)) { errorBox.textContent = 'Enter the quote reference from Netrue.'; errorBox.hidden = false; quoteReference.focus(); return; }
-    if (!email.checkValidity() || !mail) { errorBox.textContent = 'Enter the email address used for this quote.'; errorBox.hidden = false; email.focus(); return; }
     applyButton.disabled = true; applyButton.textContent = 'Checking…';
     try {
-      const response = await fetch('/api/payment-quotes/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ reference: ref, email: mail }) });
+      const response = await fetch('/api/payment-quotes/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ reference: ref }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Quote could not be applied.');
-      activeQuote = { ...data, customerEmail: mail }; selectedServiceId = data.serviceId;
+      activeQuote = data; selectedServiceId = data.serviceId;
       const service = services.find(item => item.id === data.serviceId); if (service) serviceOptions.querySelector(`[data-service-id="${CSS.escape(data.serviceId)}"]`)?.setAttribute('aria-pressed', 'true');
-      agreedPrice.value = data.agreedPrice; quoteCurrency.textContent = data.currency; currencySymbol.textContent = symbol(data.currency);
-      quoteStatus.textContent = `Quote applied for ${data.serviceName}. Check the agreed amount, then continue.`; quoteStatus.classList.remove('is-error'); quoteStatus.classList.add('is-success');
+      document.querySelector('#quote-service-name').textContent = data.serviceName;
+      document.querySelector('#quote-agreed-amount').textContent = money(data.amountMinor, data.currency);
+      document.querySelector('#quote-preview').hidden = false;
+      quoteStatus.textContent = `Quote loaded for ${data.serviceName}. The agreed amount is confirmed.`; quoteStatus.classList.remove('is-error'); quoteStatus.classList.add('is-success');
       updateControls();
+      if (fromLink) goTo(3);
     } catch (error) { activeQuote = null; quoteStatus.textContent = error.message; quoteStatus.classList.remove('is-success'); quoteStatus.classList.add('is-error'); errorBox.textContent = error.message; errorBox.hidden = false; }
     finally { applyButton.disabled = false; applyButton.textContent = 'Apply quote'; }
   }
@@ -119,16 +109,16 @@
   document.querySelector('#to-confirm').addEventListener('click', () => goTo(3));
   document.querySelectorAll('[data-back]').forEach(button => button.addEventListener('click', () => goTo(Number(button.dataset.back))));
   document.querySelectorAll('[data-progress]').forEach(button => button.addEventListener('click', () => { const step = Number(button.dataset.progress); if (step < currentStage) goTo(step); }));
-  [quoteReference, email].forEach(input => input.addEventListener('input', () => { if (activeQuote) { activeQuote = null; quoteStatus.textContent = 'Quote or email changed. Apply your quote again.'; quoteStatus.classList.remove('is-success'); } updateControls(); }));
-  [agreedPrice, name, consent].forEach(input => input.addEventListener('input', updateControls)); consent.addEventListener('change', updateControls);
+  quoteReference.addEventListener('input', () => { if (activeQuote) { activeQuote = null; document.querySelector('#quote-preview').hidden = true; quoteStatus.textContent = 'Quote reference changed. Load it again.'; quoteStatus.classList.remove('is-success'); } updateControls(); });
+  [email, name, consent].forEach(input => input.addEventListener('input', updateControls)); consent.addEventListener('change', updateControls);
   form.addEventListener('submit', async event => {
     event.preventDefault(); confirmError.hidden = true;
-    if (!name.checkValidity()) { name.reportValidity(); return; }
     if (!consent.checked) { consent.reportValidity(); return; }
-    if (!activeQuote || !selectedServiceId || minorFor(agreedPrice.value, activeQuote.currency) !== activeQuote.amountMinor) { confirmError.textContent = 'Reapply your quote and confirm the agreed amount.'; confirmError.hidden = false; return; }
+    if (!activeQuote || !selectedServiceId) { confirmError.textContent = 'Load a valid Netrue quote before continuing.'; confirmError.hidden = false; return; }
+    if (activeQuote.requiresEmail && !email.checkValidity()) { email.reportValidity(); return; }
     payButton.disabled = true; payButton.innerHTML = 'Connecting securely…';
     try {
-      const response = await fetch('/api/payments/initialize', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ serviceId: selectedServiceId, email: email.value.trim(), name: name.value.trim(), quoteReference: quoteReference.value.trim(), agreedPrice: agreedPrice.value }) });
+      const response = await fetch('/api/payments/initialize', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ serviceId: selectedServiceId, email: email.value.trim(), name: name.value.trim(), quoteReference: quoteReference.value.trim() }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Checkout could not start. Please try again.');
       location.assign(data.authorizationUrl);
     } catch (error) { confirmError.textContent = error.message; confirmError.hidden = false; payButton.innerHTML = 'Pay securely <span aria-hidden="true">↗</span>'; updateControls(); }

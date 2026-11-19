@@ -40,8 +40,8 @@ Do not leave the placeholder text in a database command. You can also edit `serv
 
 ## Payment and receipt flow
 
-- Create a payment quote from `/admin` with the customer email, service, currency, and agreed price. The quote is valid for 14 days and can be sent using the generated email draft.
-- The customer opens the payment link, confirms the matching email, selects the quoted service, and enters the agreed amount. The server checks the quote and price before initializing Paystack; the browser cannot set an arbitrary charge.
+- Create a payment quote from `/admin` by selecting a service and entering the agreed price. Currency defaults to USD; customer name and email are optional. The quote is valid for 14 days and provides a shareable payment link.
+- Opening the payment link loads the quoted service and amount automatically. If the quote has no customer email, checkout asks for one because Paystack requires an email to initialize payment. Name is optional. The server uses the saved quote amount when starting Paystack checkout.
 - After return from Paystack, the server verifies the transaction amount and currency against the saved MongoDB record. Only a verified transaction is marked paid.
 - A PDF receipt is generated from the verified record. The browser receives a signed, HttpOnly cookie that permits repeat downloads in that same browser for 30 days. The payment page also provides a saved-receipt link.
 - A quote is reserved when checkout starts to prevent duplicate use. If Paystack initialization fails, the quote is reopened. A quote whose checkout was started but abandoned needs a fresh quote from the admin.

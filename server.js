@@ -177,28 +177,30 @@ app.post('/api/payment-quotes/lookup', paymentLimiter, async (req, res, next) =>
   try {
     if (!db) return res.status(503).json({ error: 'Quote lookup needs MongoDB.' });
     const reference = typeof req.body?.reference === 'string' ? req.body.reference.trim().toUpperCase() : '';
-    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    if (!/^NTRQ-[A-F0-9]{12}$/.test(reference) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid quote reference and the email address it was issued to.' });
-    const quote = await db.collection('payment_quotes').findOne({ reference, customerEmail: email, status: 'open', expiresAt: { $gt: new Date() } });
-    if (!quote) return res.status(404).json({ error: 'We could not find an active quote for those details. Check the reference and email, or contact Netrue.' });
-    res.json({ reference: quote.reference, serviceId: quote.serviceId, serviceName: quote.serviceName, amountMinor: quote.amountMinor, currency: quote.currency, agreedPrice: quote.agreedPrice });
+    if (!/^NTRQ-[A-F0-9]{12}$/.test(reference)) return res.status(400).json({ error: 'Enter a valid Netrue quote reference.' });
+    const quote = await db.collection('payment_quotes').findOne({ reference, status: 'open', expiresAt: { $gt: new Date() } });
+    if (!quote) return res.status(404).json({ error: 'This quote could not be found or has expired. Contact Netrue for an updated quote.' });
+    res.json({ reference: quote.reference, serviceId: quote.serviceId, serviceName: quote.serviceName, amountMinor: quote.amountMinor, currency: quote.currency, agreedPrice: quote.agreedPrice, requiresEmail: !quote.customerEmail });
   } catch (error) { next(error); }
 });
 
 app.post('/api/payments/initialize', paymentLimiter, async (req, res, next) => {
   try {
     if (!db) return res.status(503).json({ error: 'Checkout needs MongoDB. Add a valid MONGODB_URI to your local .env file.' });
-    const { serviceId, email, name, quoteReference, agreedPrice } = req.body || {};
+    const { serviceId, email, name, quoteReference } = req.body || {};
     if (typeof serviceId !== 'string' || !/^[a-z0-9-]{2,80}$/.test(serviceId)) return res.status(400).json({ error: 'Choose a valid service.' });
-    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-    if (typeof name !== 'string' || name.trim().length < 2 || name.length > 120) return res.status(400).json({ error: 'Enter your name.' });
+    const suppliedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (suppliedEmail && (suppliedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppliedEmail))) return res.status(400).json({ error: 'Enter a valid email address.' });
+    const cleanName = typeof name === 'string' ? name.trim().slice(0, 120) : '';
 
     const quoteRef = typeof quoteReference === 'string' ? quoteReference.trim().toUpperCase() : '';
     if (!/^NTRQ-[A-F0-9]{12}$/.test(quoteRef)) return res.status(400).json({ error: 'Apply your Netrue quote before continuing.' });
-    const quote = await db.collection('payment_quotes').findOne({ reference: quoteRef, customerEmail: email.trim().toLowerCase(), serviceId, status: 'open', expiresAt: { $gt: new Date() } });
+    const quote = await db.collection('payment_quotes').findOne({ reference: quoteRef, serviceId, status: 'open', expiresAt: { $gt: new Date() } });
     if (!quote) return res.status(409).json({ error: 'This quote is unavailable or has expired. Contact Netrue for an updated quote.' });
+    if (quote.customerEmail && suppliedEmail && quote.customerEmail !== suppliedEmail) return res.status(400).json({ error: 'Use the email address that was provided with this quote.' });
+    const customerEmail = quote.customerEmail || suppliedEmail;
+    if (!customerEmail) return res.status(400).json({ error: 'Enter an email address so Paystack can process the payment and send a receipt.' });
     const item = { id: quote.serviceId, name: quote.serviceName, amountMinor: quote.amountMinor, currency: quote.currency };
-    if (amountToMinor(String(agreedPrice || ''), quote.currency) !== quote.amountMinor) return res.status(400).json({ error: 'Enter the agreed price shown on your quote.' });
     if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ error: 'Online payment is not configured yet. Please contact Netrue.' });
     if (!process.env.RECEIPT_COOKIE_SECRET || process.env.RECEIPT_COOKIE_SECRET.length < 32) return res.status(503).json({ error: 'Secure receipt downloads are not configured yet.' });
     if (!process.env.PUBLIC_URL || !/^https:\/\//.test(process.env.PUBLIC_URL)) return res.status(503).json({ error: 'The secure payment callback is not configured yet.' });
@@ -210,7 +212,7 @@ app.post('/api/payments/initialize', paymentLimiter, async (req, res, next) => {
     callbackUrl.searchParams.set('reference', reference);
     await db.collection('payments').insertOne({
       reference, serviceId: item.id, serviceName: item.name, amountMinor: item.amountMinor,
-      currency: item.currency, quoteReference: quote.reference, customerName: name.trim(), customerEmail: email.trim().toLowerCase(),
+      currency: item.currency, quoteReference: quote.reference, customerName: cleanName || quote.customerName || 'Customer', customerEmail,
       status: 'pending', createdAt: new Date()
     });
     let checkout;
@@ -218,9 +220,9 @@ app.post('/api/payments/initialize', paymentLimiter, async (req, res, next) => {
       checkout = await paystackRequest('https://api.paystack.co/transaction/initialize', {
         method: 'POST',
         body: JSON.stringify({
-          email: email.trim(), amount: item.amountMinor, currency: item.currency, reference,
+          email: customerEmail, amount: item.amountMinor, currency: item.currency, reference,
           callback_url: callbackUrl.toString(),
-          metadata: { customer_name: name.trim(), service_id: item.id, service_name: item.name }
+          metadata: { customer_name: cleanName || quote.customerName || 'Customer', service_id: item.id, service_name: item.name }
         })
       });
     } catch (error) {
@@ -401,7 +403,7 @@ app.post('/api/admin/payment-quotes', async (req, res, next) => {
   try {
     const { serviceId, email, name, agreedPrice, currency } = req.body || {};
     const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 254) return res.status(400).json({ error: 'Enter a valid customer email.' });
+    if (cleanEmail && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 254)) return res.status(400).json({ error: 'Enter a valid customer email.' });
     if (typeof serviceId !== 'string' || !/^[a-z0-9-]{2,80}$/.test(serviceId)) return res.status(400).json({ error: 'Choose a service.' });
     const service = await db.collection('services').findOne({ id: serviceId });
     const allowedCurrencies = ['USD', 'GBP', 'NGN', 'BRL'];

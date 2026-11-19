@@ -123,7 +123,16 @@
     try {
       const data = await api('/api/admin/payment-quotes', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(quoteForm))) });
       const link = `${location.origin}/payment.html?quote=${encodeURIComponent(data.reference)}`;
-      quoteFeedback.innerHTML = `Quote <strong>${escapeHtml(data.reference)}</strong> created for ${escapeHtml(data.amount)}. Expires in 14 days. <a href="mailto:${encodeURIComponent(data.customerEmail)}?subject=${encodeURIComponent(`Netrue payment quote ${data.reference}`)}&body=${encodeURIComponent(`Hello${data.customerName ? ` ${data.customerName}` : ''},\n\nYour agreed quote for ${data.serviceName} is ${data.amount}. Use the link below to pay.\n\n${link}\n\nQuote reference: ${data.reference}`)}">Open email draft ↗</a>`;
+      quoteFeedback.replaceChildren();
+      const message = document.createElement('span'); message.textContent = `Quote ${data.reference} created for ${data.amount}. It expires in 14 days. Share this payment link:`;
+      const paymentLink = document.createElement('a'); paymentLink.href = data.paymentUrl || link; paymentLink.textContent = data.paymentUrl || link; paymentLink.target = '_blank'; paymentLink.rel = 'noopener';
+      const copyButton = document.createElement('button'); copyButton.type = 'button'; copyButton.textContent = 'Copy payment link';
+      copyButton.addEventListener('click', async () => { try { await navigator.clipboard.writeText(paymentLink.href); copyButton.textContent = 'Copied'; } catch { window.prompt('Copy this payment link:', paymentLink.href); } });
+      quoteFeedback.append(message, document.createElement('br'), paymentLink, document.createElement('br'), copyButton);
+      if (data.customerEmail) {
+        const emailLink = document.createElement('a'); emailLink.href = `mailto:${encodeURIComponent(data.customerEmail)}?subject=${encodeURIComponent(`Netrue payment quote ${data.reference}`)}&body=${encodeURIComponent(`Hello${data.customerName ? ` ${data.customerName}` : ''},\n\nYour agreed quote for ${data.serviceName} is ${data.amount}. Use the link below to pay.\n\n${paymentLink.href}\n\nQuote reference: ${data.reference}`)}`;
+        emailLink.textContent = 'Open email draft'; quoteFeedback.append(document.createElement('br'), emailLink);
+      }
       quoteFeedback.classList.add('quote-success'); button.textContent = 'Create another quote'; button.disabled = false;
     } catch (error) { quoteFeedback.textContent = error.message; button.disabled = false; }
   });

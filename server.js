@@ -316,7 +316,13 @@ function safeSecretEqual(left, right) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!process.env.ADMIN_USER || !process.env.ADMIN_PASSWORD || process.env.ADMIN_USER.startsWith('replace_') || process.env.ADMIN_PASSWORD.length < 16 || !db) return res.status(404).send('Not found.');
+  const needsJson = req.originalUrl.startsWith('/api/');
+  if (!db) return needsJson
+    ? res.status(503).json({ error: 'Admin tools need a connected MongoDB database.' })
+    : res.status(503).send('Admin tools need a connected MongoDB database. Check MONGODB_URI and restart the app.');
+  if (!process.env.ADMIN_USER || !process.env.ADMIN_PASSWORD || process.env.ADMIN_USER.startsWith('replace_') || process.env.ADMIN_PASSWORD.length < 16) return needsJson
+    ? res.status(503).json({ error: 'Set ADMIN_USER and an ADMIN_PASSWORD of at least 16 characters, then restart the app.' })
+    : res.status(503).send('Admin sign-in is not configured. Set ADMIN_USER and an ADMIN_PASSWORD of at least 16 characters, then restart the app.');
   const header = req.headers.authorization || '';
   if (!header.startsWith('Basic ')) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Netrue Admin", charset="UTF-8"');

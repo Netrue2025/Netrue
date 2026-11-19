@@ -1,0 +1,26 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Netrue admin</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+  <header class="admin-header"><a class="admin-brand" href="/">N<span>.</span> <small>NETRUE ADMIN</small></a><a class="view-site" href="/">View site ↗</a></header>
+  <main class="admin-shell">
+    <div class="admin-title"><div><p>NETRUE / WORKSPACE</p><h1 id="admin-heading">Quick conversations</h1></div><div class="admin-actions"><button id="new-quote-button" type="button">New payment quote</button><button id="refresh-button" type="button">Refresh</button></div></div>
+    <nav class="admin-tabs" aria-label="Admin sections"><button type="button" class="is-active" data-admin-view="chats">Quick chats</button><button type="button" data-admin-view="projects">Projects</button></nav>
+    <section id="chat-management">
+      <div class="inbox-toolbar"><span id="inbox-count">Loading conversations…</span><label for="status-filter">Show <select id="status-filter"><option value="all">All conversations</option><option value="new">New</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></label></div>
+      <div class="inbox-layout"><aside class="thread-list" id="thread-list" aria-label="Quick chat conversations"></aside><section class="thread-detail" id="thread-detail" aria-live="polite"><div class="empty-state"><span>✦</span><h2>Select a conversation</h2><p>Choose a message from the inbox to view its details and reply.</p></div></section></div>
+      <p class="admin-footnote">Quick chat messages are saved in MongoDB. Replies are saved here and can be sent by email.</p>
+    </section>
+    <section class="project-management" id="project-management" hidden><div class="project-admin-heading"><div><p>PORTFOLIO / CONTENT</p><h2>Project stories</h2></div><button id="new-project-button" type="button">＋ Add project</button></div><p class="project-admin-note">Manage the project title, description and image link shown on the public website.</p><div id="project-list" class="project-admin-list"><p class="loading">Loading projects…</p></div></section>
+  </main>
+  <dialog id="quote-dialog" class="quote-dialog"><form id="quote-form"><div class="quote-dialog-head"><div><p>PAYMENTS / AGREED PRICING</p><h2>Create payment quote</h2></div><button type="button" id="close-quote" aria-label="Close">×</button></div><label for="quote-service">Service</label><select id="quote-service" name="serviceId" required></select><label for="quote-email">Customer email</label><input id="quote-email" name="email" type="email" required maxlength="254"><label for="quote-name">Customer name <span>(optional)</span></label><input id="quote-name" name="name" maxlength="120"><div class="quote-price-row"><div><label for="quote-price">Agreed price</label><input id="quote-price" name="agreedPrice" type="number" min="0.01" step="0.01" required></div><div><label for="quote-currency-admin">Currency</label><select id="quote-currency-admin" name="currency" required><option value="USD" selected>USD · US Dollar</option><option value="GBP">GBP · Pound sterling</option><option value="NGN">NGN · Nigerian naira</option><option value="BRL">BRL · Brazilian real</option></select></div></div><p id="quote-feedback" role="status"></p><button class="quote-create" type="submit">Create quote</button></form></dialog>
+  <dialog id="project-dialog" class="quote-dialog project-dialog"><form id="project-form"><div class="quote-dialog-head"><div><p>PORTFOLIO / PROJECT</p><h2 id="project-dialog-title">Add project</h2></div><button type="button" id="close-project" aria-label="Close">×</button></div><input type="hidden" name="id"><label for="project-title">Project title</label><input id="project-title" name="title" maxlength="120" required><label for="project-description">Description</label><textarea id="project-description" name="description" maxlength="1200" rows="4" required></textarea><label for="project-image">Image link (HTTPS)</label><input id="project-image" name="imageUrl" type="url" placeholder="https://example.com/project-image.jpg" required><div id="project-preview" class="project-image-preview" hidden></div><p id="project-feedback" role="status"></p><button class="quote-create" type="submit">Save project</button></form></dialog>
+</body>
+</html>

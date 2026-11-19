@@ -1,0 +1,50 @@
+[
+  {
+    "id": "ai-systems",
+    "name": "AI systems and workflows",
+    "description": "Applied AI features, intelligent workflows, and data-assisted tools.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  },
+  {
+    "id": "iot-connected-systems",
+    "name": "IoT and connected systems",
+    "description": "Connected devices, telemetry, monitoring, and device-to-cloud systems.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  },
+  {
+    "id": "embedded-engineering",
+    "name": "Embedded engineering",
+    "description": "Firmware, electronics integration, and rapid product prototyping.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  },
+  {
+    "id": "smart-agriculture",
+    "name": "Smart agriculture",
+    "description": "Agricultural monitoring, incubation, and connected farm systems.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  },
+  {
+    "id": "digital-products",
+    "name": "Digital products and web apps",
+    "description": "Web applications, product interfaces, APIs, and digital platforms.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  },
+  {
+    "id": "research-prototyping",
+    "name": "Research and prototyping",
+    "description": "Technical experiments, proof of concept, and product development.",
+    "amountMinor": null,
+    "currency": null,
+    "active": false
+  }
+]

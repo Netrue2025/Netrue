@@ -246,20 +246,28 @@ app.get('/api/payments/verify/:reference', verifyLimiter, async (req, res, next)
     if (!validReference(reference)) return res.status(400).json({ error: 'Invalid payment reference.' });
     const payment = await db.collection('payments').findOne({ reference });
     if (!payment) return res.status(404).json({ error: 'Payment reference was not found.' });
-    if (payment.status === 'review') return res.status(409).json({ error: 'The payment needs manual review. Please contact Netrue.' });
-    if (!['pending', 'paid'].includes(payment.status)) return res.status(409).json({ error: 'This payment session could not be started. Please return to the payment page.' });
+    if (!['pending', 'review', 'paid'].includes(payment.status)) return res.status(409).json({ error: 'This payment session could not be started. Please return to the payment page.' });
     if (payment.status !== 'paid') {
       if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ error: 'Payment verification is not configured.' });
       const transaction = await paystackRequest(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`);
-      const correctAmount = transaction.reference === reference && transaction.amount === payment.amountMinor && transaction.currency === payment.currency;
-      if (transaction.status !== 'success' || !correctAmount) {
-        if (transaction.status === 'success' && !correctAmount) {
-          await db.collection('payments').updateOne({ reference, status: 'pending' }, { $set: { status: 'review', verificationIssue: 'amount_or_currency_mismatch', verifiedAt: new Date() } });
+      const actualAmount = Number(transaction.amount);
+      const actualCurrency = typeof transaction.currency === 'string' ? transaction.currency.trim().toUpperCase() : '';
+      const expectedCurrency = String(payment.currency || '').trim().toUpperCase();
+      const correctReference = String(transaction.reference || '') === reference;
+      const correctAmount = Number.isSafeInteger(actualAmount) && actualAmount === Number(payment.amountMinor);
+      const correctCurrency = actualCurrency === expectedCurrency;
+      if (transaction.status !== 'success' || !correctReference || !correctAmount || !correctCurrency) {
+        if (transaction.status === 'success' && (!correctReference || !correctAmount || !correctCurrency)) {
+          await db.collection('payments').updateOne({ reference, status: { $in: ['pending', 'review'] } }, { $set: {
+            status: 'review', verificationIssue: 'paystack_transaction_mismatch', verificationCheckedAt: new Date(),
+            verificationExpected: { amountMinor: Number(payment.amountMinor), currency: expectedCurrency, reference },
+            verificationReceived: { amountMinor: Number.isSafeInteger(actualAmount) ? actualAmount : null, currency: actualCurrency || null, reference: String(transaction.reference || '') }
+          } });
           return res.status(409).json({ error: 'The payment needs manual review. Please contact Netrue with your payment reference.' });
         }
         return res.status(402).json({ error: 'Payment has not been completed.' });
       }
-      await db.collection('payments').updateOne({ reference, status: 'pending' }, {
+      await db.collection('payments').updateOne({ reference, status: { $in: ['pending', 'review'] } }, {
         $set: { status: 'paid', paidAt: transaction.paid_at ? new Date(transaction.paid_at) : new Date(), verifiedAt: new Date(), receiptNumber: `NTR-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${reference.slice(-8).toUpperCase()}` }
       });
       if (payment.quoteReference) await db.collection('payment_quotes').updateOne({ reference: payment.quoteReference, checkoutReference: reference }, { $set: { status: 'paid', paidAt: new Date() } });
@@ -267,7 +275,7 @@ app.get('/api/payments/verify/:reference', verifyLimiter, async (req, res, next)
     const confirmed = await db.collection('payments').findOne({ reference, status: 'paid' });
     if (!confirmed) return res.status(409).json({ error: 'Payment confirmation is being processed. Refresh in a moment.' });
     res.cookie('netrue_receipt', receiptCookieValue(reference), { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/api/receipt', maxAge: 30 * 24 * 60 * 60 * 1000 });
-    res.json({ status: 'paid', reference, receiptNumber: confirmed.receiptNumber, receiptUrl: '/api/receipt/download' });
+    res.json({ status: 'paid', reference, receiptNumber: confirmed.receiptNumber, serviceName: confirmed.serviceName, amount: formatCurrencyMinor(confirmed.amountMinor, confirmed.currency), receiptUrl: '/api/receipt/download' });
   } catch (error) { next(error); }
 });
 
@@ -275,28 +283,41 @@ function streamReceipt(res, payment) {
     const filename = `Netrue-receipt-${payment.receiptNumber}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    const pdf = new PDFDocument({ size: 'A4', margin: 54, info: { Title: `Netrue receipt ${payment.receiptNumber}`, Author: 'Netrue' } });
+    const pdf = new PDFDocument({ size: 'A4', margin: 54, info: { Title: `Netrue payment receipt ${payment.receiptNumber}`, Author: 'Netrue Limited', Subject: `Receipt for ${payment.serviceName}` } });
     pdf.pipe(res);
-    pdf.rect(0, 0, 595, 176).fill('#173b2c');
-    pdf.fillColor('#ffffff').font('Helvetica-Bold').fontSize(22).text('netrue.', 54, 52);
-    pdf.fillColor('#d8e8da').font('Helvetica').fontSize(10).text('PAYMENT RECEIPT', 54, 94, { characterSpacing: 1.7 });
-    pdf.fillColor('#ffffff').font('Helvetica-Bold').fontSize(17).text(payment.receiptNumber, 54, 119);
-    pdf.fillColor('#252b28').font('Helvetica-Bold').fontSize(12).text('Payment details', 54, 207);
-    pdf.moveTo(54, 229).lineTo(541, 229).strokeColor('#dce2dd').stroke();
+    pdf.rect(0, 0, 595, 210).fill('#173b2c');
+    pdf.rect(0, 204, 595, 6).fill('#c7a34e');
+    // The three ascending bars and coral dot match the Netrue favicon mark.
+    pdf.roundedRect(54, 48, 7, 15, 3).fill('#d9e9d9');
+    pdf.roundedRect(65, 37, 7, 26, 3).fill('#d9e9d9');
+    pdf.roundedRect(76, 43, 7, 20, 3).fill('#d9e9d9');
+    pdf.circle(86, 62, 2.5).fill('#df5147');
+    pdf.fillColor('#ffffff').font('Helvetica-Bold').fontSize(23).text('netrue', 101, 42);
+    pdf.fillColor('#dce8dc').font('Helvetica').fontSize(9).text('NETRUE LIMITED  /  DIGITAL & ENGINEERING', 54, 91, { characterSpacing: 1.2 });
+    pdf.fillColor('#e6c76d').font('Helvetica-Bold').fontSize(10).text('PAYMENT RECEIPT', 54, 126, { characterSpacing: 1.7 });
+    pdf.fillColor('#ffffff').font('Helvetica-Bold').fontSize(17).text(payment.receiptNumber, 54, 148);
+    pdf.roundedRect(454, 132, 87, 28, 14).fill('#e8f2e8');
+    pdf.fillColor('#246441').font('Helvetica-Bold').fontSize(9).text('PAID', 454, 142, { width: 87, align: 'center', characterSpacing: 1 });
+    pdf.roundedRect(54, 235, 487, 103, 12).fill('#f4f6ef');
+    pdf.fillColor('#748076').font('Helvetica-Bold').fontSize(8).text('AMOUNT RECEIVED', 74, 257, { characterSpacing: 1.2 });
+    pdf.fillColor('#203f2e').font('Helvetica-Bold').fontSize(27).text(formatCurrencyMinor(payment.amountMinor, payment.currency), 74, 278, { width: 430 });
+    pdf.fillColor('#657369').font('Helvetica').fontSize(10).text(payment.serviceName, 74, 316, { width: 435 });
+    pdf.fillColor('#252b28').font('Helvetica-Bold').fontSize(12).text('Payment details', 54, 374);
+    pdf.moveTo(54, 397).lineTo(541, 397).strokeColor('#dce2dd').lineWidth(1).stroke();
     const details = [
-      ['Service', payment.serviceName], ['Customer', payment.customerName], ['Email', payment.customerEmail],
-      ['Amount paid', formatCurrencyMinor(payment.amountMinor, payment.currency)],
-      ['Payment reference', payment.reference], ['Paid on', new Date(payment.paidAt).toLocaleString('en', { dateStyle: 'long', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC'],
-      ['Status', 'PAID']
+      ['Customer', payment.customerName || 'Customer'], ['Receipt email', payment.customerEmail],
+      ['Payment reference', payment.reference], ['Paid on', new Date(payment.paidAt).toLocaleString('en', { dateStyle: 'long', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC']
     ];
-    let y = 252;
+    let y = 421;
     for (const [label, value] of details) {
-      pdf.fillColor('#6b756f').font('Helvetica').fontSize(9).text(label.toUpperCase(), 54, y, { width: 135 });
-      pdf.fillColor('#252b28').font(label === 'Status' ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).text(String(value), 196, y, { width: 340 });
-      y += 37;
+      pdf.fillColor('#7b857c').font('Helvetica-Bold').fontSize(8).text(label.toUpperCase(), 54, y, { width: 135, characterSpacing: .6 });
+      pdf.fillColor('#26392d').font('Helvetica').fontSize(10).text(String(value || '—'), 196, y - 1, { width: 345 });
+      y += 43;
     }
-    pdf.moveTo(54, y + 4).lineTo(541, y + 4).strokeColor('#dce2dd').stroke();
-    pdf.fillColor('#6b756f').font('Helvetica').fontSize(9).text('Thank you for choosing Netrue. For receipt support, contact info@netrue.io.', 54, y + 24, { width: 470 });
+    pdf.moveTo(54, y + 1).lineTo(541, y + 1).strokeColor('#dce2dd').lineWidth(1).stroke();
+    pdf.fillColor('#253c2d').font('Helvetica-Bold').fontSize(12).text('Thank you for choosing Netrue.', 54, y + 25);
+    pdf.fillColor('#707b72').font('Helvetica').fontSize(9).text('Questions about this receipt? Contact info@netrue.io  ·  netrue.io', 54, y + 47, { width: 487 });
+    pdf.fillColor('#a0a79f').font('Helvetica').fontSize(8).text('This receipt confirms payment processed securely by Paystack.', 54, 773, { width: 487, align: 'center' });
     pdf.end();
 }
 

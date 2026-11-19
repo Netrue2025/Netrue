@@ -127,10 +127,19 @@
     const params = new URLSearchParams(location.search); const reference = params.get('reference') || params.get('trxref'); if (!reference) return;
     form.hidden = true; result.hidden = false; result.innerHTML = '<span class="result-icon result-wait">…</span><span class="result-eyebrow">PAYMENT STATUS</span><h2>Confirming your payment</h2><p>We are checking your transaction with Paystack.</p>';
     try {
-      const response = await fetch(`/api/payments/verify/${encodeURIComponent(reference)}`, { headers: { Accept: 'application/json' } }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Payment confirmation is not available yet.');
-      result.innerHTML = `<span class="result-icon">✓</span><span class="result-eyebrow">PAYMENT CONFIRMED</span><h2>Thank you.</h2><p>Receipt <strong>${escapeHtml(data.receiptNumber)}</strong> is ready. This browser can download it again for 30 days.</p><a class="button button-primary receipt-download" href="${escapeHtml(data.receiptUrl)}">Download receipt ↓</a><a class="payment-result-home" href="/">Return to Netrue</a>`;
-      setTimeout(() => result.querySelector('.receipt-download')?.click(), 350);
-    } catch (error) { result.innerHTML = `<span class="result-icon result-pending">!</span><span class="result-eyebrow">PAYMENT STATUS</span><h2>We could not confirm this yet.</h2><p>${escapeHtml(error.message)}</p><a href="mailto:info@netrue.io">Contact info@netrue.io</a><a class="payment-result-home" href="/payment.html">Return to checkout</a>`; }
+      let data;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const response = await fetch(`/api/payments/verify/${encodeURIComponent(reference)}`, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+        data = await response.json().catch(() => ({}));
+        if (response.ok) break;
+        const mayStillSettle = response.status === 402 || response.status >= 500 || (response.status === 409 && /processing/i.test(data.error || ''));
+        if (!mayStillSettle || attempt === 4) throw new Error(data.error || 'Payment confirmation is not available yet.');
+        result.querySelector('p').textContent = 'Your payment is settling. We will check again in a moment.';
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+      result.classList.add('payment-result-success');
+      result.innerHTML = `<div class="receipt-brand"><span class="receipt-mark" aria-hidden="true"><i></i><i></i><i></i><b></b></span><strong>netrue<span>.</span></strong></div><span class="result-icon">✓</span><span class="result-eyebrow">PAYMENT CONFIRMED</span><h2>Thank you.</h2><p>Your payment for <strong>${escapeHtml(data.serviceName || 'your Netrue service')}</strong> was received.</p><div class="receipt-ready"><span>AMOUNT PAID</span><strong>${escapeHtml(data.amount || '')}</strong><small>Receipt ${escapeHtml(data.receiptNumber)}</small></div><a class="button button-primary receipt-download" href="${escapeHtml(data.receiptUrl)}">Download your receipt <span aria-hidden="true">↓</span></a><p class="receipt-note">Your receipt is saved in this browser for 30 days.</p><a class="payment-result-home" href="/">Return to Netrue</a>`;
+    } catch (error) { result.classList.add('payment-result-failed'); result.innerHTML = `<span class="result-icon result-pending">!</span><span class="result-eyebrow">PAYMENT STATUS</span><h2>We could not confirm this yet.</h2><p>${escapeHtml(error.message)}</p><p class="payment-reference-note">Reference: <strong>${escapeHtml(reference)}</strong></p><a class="button button-primary" href="/payment.html?reference=${encodeURIComponent(reference)}">Check payment again</a><a href="mailto:info@netrue.io?subject=${encodeURIComponent(`Payment verification ${reference}`)}&body=${encodeURIComponent(`Please check payment reference ${reference}.`)}">Contact info@netrue.io</a><a class="payment-result-home" href="/">Return to Netrue</a>`; }
   }
   function escapeHtml(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
   loadServices(); verifyReturn();

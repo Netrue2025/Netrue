@@ -118,7 +118,7 @@
     if (activeQuote.requiresEmail && !email.checkValidity()) { email.reportValidity(); return; }
     payButton.disabled = true; payButton.innerHTML = 'Connecting securely…';
     try {
-      const response = await fetch('/api/payments/initialize', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ serviceId: selectedServiceId, email: email.value.trim(), name: name.value.trim(), quoteReference: quoteReference.value.trim() }) });
+      const response = await fetch('/api/payments/initialize', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ serviceId: selectedServiceId, email: email.value.trim(), name: name.value.trim(), quoteReference: quoteReference.value.trim(), agreedPrice: activeQuote.agreedPrice }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Checkout could not start. Please try again.');
       location.assign(data.authorizationUrl);
     } catch (error) { confirmError.textContent = error.message; confirmError.hidden = false; payButton.innerHTML = 'Pay securely <span aria-hidden="true">↗</span>'; updateControls(); }

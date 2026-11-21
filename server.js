@@ -8,6 +8,8 @@ const { rateLimit } = require('express-rate-limit');
 const { MongoClient } = require('mongodb');
 const PDFDocument = require('pdfkit');
 const webPush = require('web-push');
+const ip3country = require('ip3country');
+ip3country.init();
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -44,18 +46,38 @@ if (vapidConfigured) {
   webPush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:info@netrue.io', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
 }
 
+function pushFailureHint(error) {
+  if ([401, 403].includes(error?.statusCode)) return 'Push service rejected the VAPID credentials. Confirm the Railway key pair and re-enable alerts on devices if the keys changed.';
+  if ([404, 410].includes(error?.statusCode)) return 'This browser subscription expired. Re-enable push alerts on that device.';
+  return `Push delivery failed${error?.statusCode ? ` (${error.statusCode})` : ''}. Check the Railway deployment logs.`;
+}
+
+async function deliverPush(subscription, title, body, url, tag) {
+  await webPush.sendNotification(subscription, JSON.stringify({ title, body, url, tag }), { TTL: 120, urgency: 'high' });
+}
+
 async function notifyAdmins(title, body, url = '/admin', tag = 'netrue-activity') {
-  if (!db || !vapidConfigured) return;
+  if (!db || !vapidConfigured) return { sent: 0, failed: 0, subscriptions: 0 };
   try {
     const subscriptions = await db.collection('push_subscriptions').find({}, { projection: { _id: 0 } }).toArray();
-    await Promise.allSettled(subscriptions.map(async subscription => {
-      try { await webPush.sendNotification(subscription, JSON.stringify({ title, body, url, tag })); }
+    let sent = 0;
+    const outcomes = await Promise.allSettled(subscriptions.map(async subscription => {
+      try { await deliverPush(subscription, title, body, url, tag); sent += 1; }
       catch (error) {
         if (error.statusCode === 404 || error.statusCode === 410) await db.collection('push_subscriptions').deleteOne({ endpoint: subscription.endpoint });
-        else console.error('Admin push delivery failed:', error.statusCode || error.message);
+        throw error;
       }
     }));
-  } catch (error) { console.error('Admin push lookup failed:', error.message); }
+    const failures = outcomes.filter(item => item.status === 'rejected');
+    if (failures.length) console.error('Admin push delivery summary:', failures.map(item => pushFailureHint(item.reason)).join(' | '));
+    return { sent, failed: failures.length, subscriptions: subscriptions.length };
+  } catch (error) { console.error('Admin push lookup failed:', error.message); return { sent: 0, failed: 1, subscriptions: 0 }; }
+}
+
+function countryFromRequest(req) {
+  const ip = typeof req.ip === 'string' ? req.ip.replace(/^::ffff:/i, '') : '';
+  if (!ip || ip === '::1' || ip === '127.0.0.1') return null;
+  try { return ip3country.lookupStr(ip) || null; } catch { return null; }
 }
 
 function requestCookie(req, name) {
@@ -154,10 +176,11 @@ app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
     const sessionId = typeof req.body?.sessionId === 'string' && /^[a-f0-9-]{16,40}$/i.test(req.body.sessionId) ? req.body.sessionId : '';
     if (!sessionId) return res.status(400).json({ error: 'Invalid visit session.' });
     const page = validVisitorPage(req.body?.page);
+    const previous = await db.collection('visitor_sessions').findOne({ _id: sessionId });
+    const countryCode = previous?.countryCode || countryFromRequest(req);
     const event = ['visit', 'heartbeat', 'page', 'inactive', 'resume'].includes(req.body?.event) ? req.body.event : 'heartbeat';
     const sessions = db.collection('visitor_sessions');
     const visitors = db.collection('visitors');
-    const previous = await sessions.findOne({ _id: sessionId });
     const isNewSession = !previous;
     const previousVisitor = isNewSession ? await visitors.findOne({ _id: visitorId }, { projection: { _id: 1 } }) : null;
     const previousPath = previous?.currentPage || '';
@@ -173,7 +196,7 @@ app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
     const isOffline = event === 'inactive';
     await sessions.updateOne({ _id: sessionId }, {
       $set: {
-        visitorId, visitorLabel: `Visitor ${visitorId.slice(-5).toUpperCase()}`, currentPage: page,
+        visitorId, visitorLabel: `Visitor ${visitorId.slice(-5).toUpperCase()}`, currentPage: page, countryCode,
         visitorType: previous?.visitorType || (previousVisitor ? 'returning' : 'new'),
         pageHistory, status: isOffline ? 'offline' : 'online', lastActiveAt: isOffline ? (previous?.lastActiveAt || now) : now,
         updatedAt: now, expiresAt: new Date(now.getTime() + 30 * 86400000),
@@ -183,11 +206,12 @@ app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
     }, { upsert: true });
     if (isNewSession && event !== 'inactive') {
       await visitors.updateOne({ _id: visitorId }, {
-        $set: { lastSeenAt: now, expiresAt: new Date(now.getTime() + 180 * 86400000) },
+        $set: { lastSeenAt: now, countryCode, expiresAt: new Date(now.getTime() + 180 * 86400000) },
         $setOnInsert: { firstSeenAt: now },
         $inc: { visitCount: 1 }
       }, { upsert: true });
-      void notifyAdmins(previousVisitor ? 'Returning visitor arrived' : 'New website visitor', `Visitor ${visitorId.slice(-5).toUpperCase()} opened ${page}.`, '/admin?view=visitors', `visitor-${sessionId}`);
+      const countryName = countryCode ? new Intl.DisplayNames(['en'], { type: 'region' }).of(countryCode) : null;
+      void notifyAdmins(previousVisitor ? 'Returning visitor arrived' : 'New website visitor', `Visitor ${visitorId.slice(-5).toUpperCase()}${countryName ? ` from ${countryName}` : ''} opened ${page}.`, '/admin?view=visitors', `visitor-${sessionId}`);
     }
     res.json({ tracked: true });
   } catch (error) { next(error); }
@@ -465,6 +489,14 @@ app.get('/api/admin/services', async (_req, res, next) => {
 
 app.get('/api/admin/push/vapid-public-key', (_req, res) => res.json({ configured: vapidConfigured, publicKey: vapidConfigured ? process.env.VAPID_PUBLIC_KEY : null }));
 
+app.get('/api/admin/push/status', async (_req, res, next) => {
+  try {
+    const subscriptions = await db.collection('push_subscriptions').countDocuments();
+    const fingerprint = vapidConfigured ? crypto.createHash('sha256').update(process.env.VAPID_PUBLIC_KEY).digest('hex').slice(0, 10) : null;
+    res.json({ configured: vapidConfigured, subscriptions, fingerprint });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/admin/push/subscriptions', async (req, res, next) => {
   try {
     const subscription = req.body || {};
@@ -487,13 +519,31 @@ app.delete('/api/admin/push/subscriptions', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/api/admin/push/test', async (req, res, next) => {
+  try {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+    if (!endpoint.startsWith('https://')) return res.status(400).json({ error: 'Enable push alerts on this device before sending a test.' });
+    if (!vapidConfigured) return res.status(503).json({ error: 'VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY are not configured on the server.' });
+    const subscription = await db.collection('push_subscriptions').findOne({ endpoint }, { projection: { _id: 0 } });
+    if (!subscription) return res.status(404).json({ error: 'This device subscription was not found. Disable and re-enable push alerts.' });
+    try {
+      await deliverPush(subscription, 'Netrue alerts are working', 'This device can receive admin activity notifications.', '/admin', 'netrue-push-test');
+      res.json({ sent: true });
+    } catch (error) {
+      if (error.statusCode === 404 || error.statusCode === 410) await db.collection('push_subscriptions').deleteOne({ endpoint });
+      console.error('Admin push test failed:', error.statusCode || error.message);
+      res.status(502).json({ error: pushFailureHint(error) });
+    }
+  } catch (error) { next(error); }
+});
+
 app.get('/api/admin/visitors', async (_req, res, next) => {
   try {
     const now = new Date();
     const cutoff = new Date(now.getTime() - 2 * 60 * 1000);
     await db.collection('visitor_sessions').updateMany({ status: 'online', lastActiveAt: { $lte: cutoff } }, { $set: { status: 'offline', endedAt: now } });
     const sessions = await db.collection('visitor_sessions').find({ expiresAt: { $gt: now } }, {
-      projection: { _id: 0, visitorLabel: 1, visitorType: 1, currentPage: 1, pageHistory: 1, status: 1, startedAt: 1, lastActiveAt: 1, totalDurationSeconds: 1 }
+      projection: { _id: 0, visitorLabel: 1, visitorType: 1, countryCode: 1, currentPage: 1, pageHistory: 1, status: 1, startedAt: 1, lastActiveAt: 1, totalDurationSeconds: 1 }
     }).sort({ lastActiveAt: -1 }).limit(100).toArray();
     res.json({ online: sessions.filter(session => session.status === 'online').length, sessions });
   } catch (error) { next(error); }

@@ -100,6 +100,7 @@
   const visitorView = document.querySelector('#visitor-management');
   const visitorList = document.querySelector('#visitor-list');
   const pushButton = document.querySelector('#push-toggle-button');
+  const pushTestButton = document.querySelector('#push-test-button');
   const pushStatus = document.querySelector('#push-status');
   const installButton = document.querySelector('#install-app-button');
   let visitorTimer;
@@ -137,6 +138,13 @@
         const name = document.createElement('h3'); name.textContent = session.visitorLabel || 'Website visitor';
         const type = document.createElement('span'); type.textContent = `${session.visitorType || 'visitor'} · ${dateLabel(session.startedAt)}`;
         identity.append(name, type);
+        if (/^[A-Z]{2}$/.test(session.countryCode || '')) {
+          let countryName = session.countryCode;
+          try { countryName = new Intl.DisplayNames([navigator.language || 'en'], { type: 'region' }).of(session.countryCode) || session.countryCode; } catch {}
+          const flag = String.fromCodePoint(...[...session.countryCode].map(letter => letter.charCodeAt(0) + 127397));
+          const country = document.createElement('span'); country.className = 'visitor-country-badge'; country.title = 'Approximate country from IP address'; country.textContent = `${flag} ${countryName}`;
+          identity.append(country);
+        }
         const state = document.createElement('span'); state.className = `visitor-state ${session.status === 'online' ? 'online' : ''}`; state.textContent = session.status === 'online' ? 'Online' : 'Offline';
         heading.append(identity, state);
         const page = document.createElement('p'); page.className = 'visitor-current-page'; page.textContent = `Browsing ${session.currentPage || '/'}`;
@@ -159,13 +167,21 @@
   }
   function updatePushControl() {
     pushButton.textContent = pushSubscription ? 'Disable push alerts' : 'Enable push alerts';
-    pushStatus.textContent = pushSubscription ? 'Push alerts are enabled on this device.' : 'Push alerts are off on this device.';
+    pushTestButton.hidden = !pushSubscription;
+  }
+  async function loadPushStatus() {
+    try {
+      const data = await api('/api/admin/push/status');
+      if (!data.configured) pushStatus.textContent = 'Push server is missing VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY in Railway Variables.';
+      else if (!data.subscriptions) pushStatus.textContent = 'Server is ready, but no admin devices are subscribed yet.';
+      else pushStatus.textContent = `Push server ready · ${data.subscriptions} subscribed device${data.subscriptions === 1 ? '' : 's'} · key ${data.fingerprint}`;
+    } catch (error) { pushStatus.textContent = `Could not check push setup: ${error.message}`; }
   }
   async function initDeviceFeatures() {
     if (!('serviceWorker' in navigator)) { pushStatus.textContent = 'This browser does not support the admin app features.'; pushButton.disabled = true; return; }
     try {
-      const registration = await navigator.serviceWorker.register('/service-worker.js');
-      pushSubscription = await registration.pushManager.getSubscription(); updatePushControl();
+      const registration = await navigator.serviceWorker.register('/service-worker.js?v=2');
+      pushSubscription = await registration.pushManager.getSubscription(); updatePushControl(); await loadPushStatus();
     } catch { pushStatus.textContent = 'Install or push alerts require HTTPS (or localhost) and a supported browser.'; }
   }
   pushButton.addEventListener('click', async () => {
@@ -174,17 +190,28 @@
       const registration = await navigator.serviceWorker.ready;
       if (pushSubscription) {
         await api('/api/admin/push/subscriptions', { method: 'DELETE', body: JSON.stringify({ endpoint: pushSubscription.endpoint }) });
-        await pushSubscription.unsubscribe(); pushSubscription = null; updatePushControl(); return;
+        await pushSubscription.unsubscribe(); pushSubscription = null; updatePushControl(); await loadPushStatus(); return;
       }
       if (!('Notification' in window) || !registration.pushManager) throw new Error('Push alerts are not supported by this browser.');
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') throw new Error('Allow notifications in your browser settings to enable alerts.');
       const config = await api('/api/admin/push/vapid-public-key');
       if (!config.configured || !config.publicKey) throw new Error('Add VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Railway Variables, then redeploy.');
-      pushSubscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationKey(config.publicKey) });
-      await api('/api/admin/push/subscriptions', { method: 'POST', body: JSON.stringify(pushSubscription) }); updatePushControl();
+      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationKey(config.publicKey) });
+      try { await api('/api/admin/push/subscriptions', { method: 'POST', body: JSON.stringify(subscription) }); }
+      catch (error) { await subscription.unsubscribe(); throw error; }
+      pushSubscription = subscription; updatePushControl(); await loadPushStatus();
     } catch (error) { pushStatus.textContent = error.message; }
     finally { pushButton.disabled = false; }
+  });
+  pushTestButton.addEventListener('click', async () => {
+    if (!pushSubscription) return;
+    pushTestButton.disabled = true; pushStatus.textContent = 'Sending a test notification to this device…';
+    try {
+      await api('/api/admin/push/test', { method: 'POST', body: JSON.stringify({ endpoint: pushSubscription.endpoint }) });
+      pushStatus.textContent = 'Test sent. Check this device’s notification tray and browser notification settings.';
+    } catch (error) { pushStatus.textContent = error.message; }
+    finally { pushTestButton.disabled = false; }
   });
   window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); window.deferredAdminInstall = event; installButton.hidden = false; });
   installButton.addEventListener('click', async () => {

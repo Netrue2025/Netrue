@@ -16,7 +16,8 @@ self.addEventListener('push', event => {
     badge: '/icons/netrue-192.png',
     tag: payload.tag || 'netrue-activity',
     data: { url: typeof payload.url === 'string' && payload.url.startsWith('/') ? payload.url : '/admin' },
-    renotify: true
+    renotify: true,
+    requireInteraction: true
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });

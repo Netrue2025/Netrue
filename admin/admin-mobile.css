@@ -1,0 +1,52 @@
+/* Touch-first enhancements for the installable admin workspace. */
+:root { color-scheme: light; }
+html { -webkit-text-size-adjust: 100%; }
+body { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+button, select, input, textarea { font: inherit; }
+button, a, select { touch-action: manipulation; }
+.admin-header { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(16px); }
+.admin-shell { width: min(100% - 28px, 1080px); margin: 0 auto; }
+.admin-title { align-items: flex-start; gap: 14px; }
+.admin-title h1 { font-size: clamp(1.55rem, 6vw, 2.25rem); }
+.admin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-actions button, .admin-device-tools button, .visitor-heading button, .project-admin-heading button { min-height: 44px; }
+.admin-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px 11px; margin: 12px 0 8px; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.admin-tabs button { flex: 0 0 auto; min-height: 44px; padding: 0 16px; border-radius: 999px; }
+.admin-device-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin: 8px 0 16px; border: 1px solid rgba(23, 59, 44, .14); border-radius: 16px; background: rgba(255, 255, 255, .82); }
+.admin-device-tools > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-device-tools p { margin: 0; font-size: .85rem; }
+.visitor-management { padding: clamp(14px, 3vw, 24px); border-radius: 20px; background: rgba(255,255,255,.78); }
+.visitor-heading, .visitor-session-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.visitor-heading h2 { margin: 0; font-size: 1.5rem; }
+.visitor-heading p { margin: 0 0 4px; font-size: .72rem; letter-spacing: .12em; }
+.visitor-explainer { margin: 8px 0 18px; color: #63736a; font-size: .9rem; }
+.visitor-stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.visitor-stat-grid article { padding: 14px; border: 1px solid rgba(23,59,44,.12); border-radius: 14px; background: #f7f8f2; }
+.visitor-stat-grid article span { display: block; color: #68766c; font-size: .7rem; letter-spacing: .08em; }
+.visitor-stat-grid article strong { display: block; margin-top: 4px; color: #173b2c; font-size: 1.7rem; }
+.visitor-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.visitor-session-card { min-width: 0; padding: 15px; border: 1px solid rgba(23,59,44,.13); border-radius: 16px; background: #fff; box-shadow: 0 8px 24px rgba(16,38,28,.04); }
+.visitor-session-heading h3 { margin: 0 0 3px; font-size: 1rem; }
+.visitor-session-heading > div > span { color: #66756b; font-size: .78rem; }
+.visitor-state { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; color: #69756d; background: #edf0ec; font-size: .75rem; font-weight: 700; }
+.visitor-state.online { color: #155b3a; background: #e4f4e9; }
+.visitor-current-page { overflow-wrap: anywhere; margin: 13px 0 10px; color: #183b2d; font-weight: 700; }
+.visitor-session-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: #65746b; font-size: .76rem; }
+.visitor-list .empty-list { padding: 22px; border: 1px dashed rgba(23,59,44,.2); border-radius: 14px; text-align: center; }
+[hidden] { display: none !important; }
+@media (max-width: 640px) {
+  .admin-header { padding-left: 14px; padding-right: 14px; }
+  .admin-shell { width: min(100% - 22px, 1080px); }
+  .admin-title { display: flex; flex-direction: column; }
+  .admin-actions { width: 100%; }
+  .admin-actions button { flex: 1; }
+  .admin-device-tools { align-items: stretch; flex-direction: column; }
+  .admin-device-tools > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .admin-device-tools button { padding: 8px; }
+  .inbox-layout { grid-template-columns: 1fr !important; }
+  .thread-list { max-height: 31vh; overflow: auto; }
+  .thread-detail { min-height: 48vh; }
+  .visitor-management { padding: 14px; }
+  .visitor-session-meta { flex-direction: column; gap: 4px; }
+  dialog { width: calc(100% - 24px); max-height: calc(100dvh - 28px); overflow-y: auto; }
+}

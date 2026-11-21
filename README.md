@@ -49,6 +49,16 @@ The chat form validates and stores consented enquiries in the MongoDB `enquiries
 
 The lightweight quick-chat modal stores conversations in `quick_chats`. The protected admin workspace is at `/admin`. It manages quick chat threads, creates quotes in USD by default (with GBP, NGN and BRL options), and can add, edit or remove public project cards using a title, description and HTTPS image link. Set `ADMIN_USER` and a unique `ADMIN_PASSWORD` of at least 16 characters in Railway Variables to enable it. Admin replies are stored in the thread and the inbox offers an email draft to send to the visitor. Configure an email provider later if you want replies sent directly from the app.
 
+## Admin PWA, visitor activity, and push alerts
+
+- `/admin` is installable as a mobile-first PWA in supported browsers. Sign in over HTTPS, then use **Install admin app** if your browser offers installation.
+- The public website asks the visitor before setting the first-party activity cookie. If accepted, the admin's **Live visitors** view shows an anonymous session label, current page, page time, session time, and last activity. It does not collect visitor IP addresses, names, email addresses, or page query parameters. Visitors are marked offline after two minutes without activity. The visitor session and cookie identifiers expire automatically after 30 and 180 days respectively.
+- Push alerts cover new/returning visits, quick chat messages, enquiries, and verified payments. Push delivery requires VAPID keys and an admin must enable notifications on each device/browser. Generate keys locally with `npx web-push generate-vapid-keys`, then add `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT=mailto:info@netrue.io` to Railway Variables and redeploy. Keep the private key secret. Open `/admin` over the Railway HTTPS domain and select **Enable push alerts**. Browser notification permission is device-specific.
+
+## Google reviews
+
+The supplied Google share link can be shown as a link from the landing page, but it does not provide a reliable public feed for embedding review text. To show live reviews, the business must own and verify its Google Business Profile, enable access to the Google Business Profile APIs, and configure server-side OAuth credentials with the review-reading scope. Then the app can request reviews for the verified location and render them. Do not place OAuth credentials in browser code. The location map can be embedded separately with a Google Maps Embed API key.
+
 ## Local development
 
 Run `npm install` followed by `npm start`. Without a valid MongoDB URI (including while `.env` still contains the sample `CLUSTER.mongodb.net` value), the app starts in local preview mode so you can view the pages at `http://localhost:3000`; chat storage, the admin inbox, payment, and receipts stay disabled. To try those features, copy `.env.example` to `.env`, enter a real MongoDB URI and Paystack test key, set a unique admin username and a password of at least 16 characters, configure `RECEIPT_COOKIE_SECRET`, then restart the app. Create a quote from `/admin` before trying checkout.

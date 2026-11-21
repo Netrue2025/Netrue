@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { MongoClient } = require('mongodb');
 const PDFDocument = require('pdfkit');
+const webPush = require('web-push');
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -35,7 +36,40 @@ const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardH
 const receiptLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
 const enquiryLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 6, standardHeaders: 'draft-7', legacyHeaders: false });
 const quickChatLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false });
+const visitorLimiter = rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: 'draft-7', legacyHeaders: false });
 const adminLimiter = rateLimit({ windowMs: 60 * 1000, limit: 90, standardHeaders: 'draft-7', legacyHeaders: false });
+
+const vapidConfigured = Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+if (vapidConfigured) {
+  webPush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:info@netrue.io', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+}
+
+async function notifyAdmins(title, body, url = '/admin', tag = 'netrue-activity') {
+  if (!db || !vapidConfigured) return;
+  try {
+    const subscriptions = await db.collection('push_subscriptions').find({}, { projection: { _id: 0 } }).toArray();
+    await Promise.allSettled(subscriptions.map(async subscription => {
+      try { await webPush.sendNotification(subscription, JSON.stringify({ title, body, url, tag })); }
+      catch (error) {
+        if (error.statusCode === 404 || error.statusCode === 410) await db.collection('push_subscriptions').deleteOne({ endpoint: subscription.endpoint });
+        else console.error('Admin push delivery failed:', error.statusCode || error.message);
+      }
+    }));
+  } catch (error) { console.error('Admin push lookup failed:', error.message); }
+}
+
+function requestCookie(req, name) {
+  return (req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1) || '';
+}
+
+function validVisitorPage(value) {
+  if (typeof value !== 'string' || value.length > 180 || !value.startsWith('/')) return '/';
+  try {
+    const url = new URL(value, 'https://netrue.invalid');
+    if (url.origin !== 'https://netrue.invalid') return '/';
+    return `${url.pathname}${url.hash}`.slice(0, 180);
+  } catch { return '/'; }
+}
 
 function validReference(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(value);
@@ -107,6 +141,58 @@ async function paystackRequest(url, options = {}) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, mode: previewMode ? 'preview' : 'connected' }));
 
+app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
+  try {
+    if (requestCookie(req, 'netrue_visitor_consent') !== 'accepted') return res.status(204).end();
+    if (!db) return res.status(204).end();
+    const now = new Date();
+    let visitorId = requestCookie(req, 'netrue_visitor');
+    if (!/^[a-f0-9]{32}$/.test(visitorId)) {
+      visitorId = crypto.randomBytes(16).toString('hex');
+      res.cookie('netrue_visitor', visitorId, { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/', maxAge: 180 * 24 * 60 * 60 * 1000 });
+    }
+    const sessionId = typeof req.body?.sessionId === 'string' && /^[a-f0-9-]{16,40}$/i.test(req.body.sessionId) ? req.body.sessionId : '';
+    if (!sessionId) return res.status(400).json({ error: 'Invalid visit session.' });
+    const page = validVisitorPage(req.body?.page);
+    const event = ['visit', 'heartbeat', 'page', 'inactive', 'resume'].includes(req.body?.event) ? req.body.event : 'heartbeat';
+    const sessions = db.collection('visitor_sessions');
+    const visitors = db.collection('visitors');
+    const previous = await sessions.findOne({ _id: sessionId });
+    const isNewSession = !previous;
+    const previousVisitor = isNewSession ? await visitors.findOne({ _id: visitorId }, { projection: { _id: 1 } }) : null;
+    const previousPath = previous?.currentPage || '';
+    const rawGapSeconds = previous?.lastActiveAt ? Math.floor((now - new Date(previous.lastActiveAt)) / 1000) : 0;
+    const gapSeconds = rawGapSeconds >= 0 && rawGapSeconds <= 30 ? rawGapSeconds : 0;
+    const pageHistory = Array.isArray(previous?.pageHistory) ? previous.pageHistory.slice(-19) : [];
+    if (!pageHistory.length) pageHistory.push({ page, enteredAt: now, durationSeconds: 0 });
+    else if (previousPath !== page) {
+      if (gapSeconds) pageHistory[pageHistory.length - 1].durationSeconds = Math.min(86400, (pageHistory.at(-1).durationSeconds || 0) + gapSeconds);
+      pageHistory.push({ page, enteredAt: now, durationSeconds: 0 });
+    }
+    else pageHistory[pageHistory.length - 1].durationSeconds = Math.min(86400, (pageHistory.at(-1).durationSeconds || 0) + gapSeconds);
+    const isOffline = event === 'inactive';
+    await sessions.updateOne({ _id: sessionId }, {
+      $set: {
+        visitorId, visitorLabel: `Visitor ${visitorId.slice(-5).toUpperCase()}`, currentPage: page,
+        visitorType: previous?.visitorType || (previousVisitor ? 'returning' : 'new'),
+        pageHistory, status: isOffline ? 'offline' : 'online', lastActiveAt: isOffline ? (previous?.lastActiveAt || now) : now,
+        updatedAt: now, expiresAt: new Date(now.getTime() + 30 * 86400000),
+        startedAt: previous?.startedAt || now, totalDurationSeconds: (previous?.totalDurationSeconds || 0) + gapSeconds
+      },
+      $setOnInsert: { createdAt: now }
+    }, { upsert: true });
+    if (isNewSession && event !== 'inactive') {
+      await visitors.updateOne({ _id: visitorId }, {
+        $set: { lastSeenAt: now, expiresAt: new Date(now.getTime() + 180 * 86400000) },
+        $setOnInsert: { firstSeenAt: now },
+        $inc: { visitCount: 1 }
+      }, { upsert: true });
+      void notifyAdmins(previousVisitor ? 'Returning visitor arrived' : 'New website visitor', `Visitor ${visitorId.slice(-5).toUpperCase()} opened ${page}.`, '/admin?view=visitors', `visitor-${sessionId}`);
+    }
+    res.json({ tracked: true });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/services', async (_req, res, next) => {
   try {
     const services = db
@@ -142,6 +228,7 @@ app.post('/api/quick-chats', quickChatLimiter, async (req, res, next) => {
       status: 'new', consent: true, source: 'landing_quick_chat',
       createdAt: now, updatedAt: now
     });
+    void notifyAdmins('New quick chat', `A visitor sent a message. Reference ${reference}.`, '/admin?view=chats', `quick-chat-${reference}`);
     res.status(201).json({ accepted: true, reference });
   } catch (error) { next(error); }
 });
@@ -169,6 +256,7 @@ app.post('/api/enquiries', enquiryLimiter, async (req, res, next) => {
       name: name.trim(), email: cleanEmail || null, whatsapp: cleanWhatsapp || null,
       consent: true, status: 'new', createdAt: new Date()
     });
+    void notifyAdmins('New project enquiry', `A visitor sent an enquiry. Reference ${reference}.`, '/admin?view=chats', `enquiry-${reference}`);
     res.status(201).json({ accepted: true, reference });
   } catch (error) { next(error); }
 });
@@ -267,9 +355,10 @@ app.get('/api/payments/verify/:reference', verifyLimiter, async (req, res, next)
         }
         return res.status(402).json({ error: 'Payment has not been completed.' });
       }
-      await db.collection('payments').updateOne({ reference, status: { $in: ['pending', 'review'] } }, {
+      const markedPaid = await db.collection('payments').updateOne({ reference, status: { $in: ['pending', 'review'] } }, {
         $set: { status: 'paid', paidAt: transaction.paid_at ? new Date(transaction.paid_at) : new Date(), verifiedAt: new Date(), receiptNumber: `NTR-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${reference.slice(-8).toUpperCase()}` }
       });
+      if (markedPaid.modifiedCount) void notifyAdmins('Payment completed', `${payment.serviceName} payment verified (${reference}).`, '/admin?view=visitors', `payment-${reference}`);
       if (payment.quoteReference) await db.collection('payment_quotes').updateOne({ reference: payment.quoteReference, checkoutReference: reference }, { $set: { status: 'paid', paidAt: new Date() } });
     }
     const confirmed = await db.collection('payments').findOne({ reference, status: 'paid' });
@@ -372,6 +461,42 @@ app.use('/api/admin', adminLimiter, requireAdmin);
 app.get('/api/admin/services', async (_req, res, next) => {
   try { res.json(await db.collection('services').find({}, { projection: { _id: 0, id: 1, name: 1, currency: 1 } }).sort({ name: 1 }).toArray()); }
   catch (error) { next(error); }
+});
+
+app.get('/api/admin/push/vapid-public-key', (_req, res) => res.json({ configured: vapidConfigured, publicKey: vapidConfigured ? process.env.VAPID_PUBLIC_KEY : null }));
+
+app.post('/api/admin/push/subscriptions', async (req, res, next) => {
+  try {
+    const subscription = req.body || {};
+    if (typeof subscription.endpoint !== 'string' || !subscription.endpoint.startsWith('https://') || typeof subscription.keys?.p256dh !== 'string' || typeof subscription.keys?.auth !== 'string') return res.status(400).json({ error: 'A valid browser push subscription is required.' });
+    const now = new Date();
+    await db.collection('push_subscriptions').updateOne({ endpoint: subscription.endpoint }, {
+      $set: { endpoint: subscription.endpoint, expirationTime: subscription.expirationTime || null, keys: subscription.keys, updatedAt: now },
+      $setOnInsert: { createdAt: now }
+    }, { upsert: true });
+    res.status(201).json({ subscribed: true });
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/admin/push/subscriptions', async (req, res, next) => {
+  try {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+    if (!endpoint.startsWith('https://')) return res.status(400).json({ error: 'A valid subscription endpoint is required.' });
+    await db.collection('push_subscriptions').deleteOne({ endpoint });
+    res.json({ unsubscribed: true });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/visitors', async (_req, res, next) => {
+  try {
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - 2 * 60 * 1000);
+    await db.collection('visitor_sessions').updateMany({ status: 'online', lastActiveAt: { $lte: cutoff } }, { $set: { status: 'offline', endedAt: now } });
+    const sessions = await db.collection('visitor_sessions').find({ expiresAt: { $gt: now } }, {
+      projection: { _id: 0, visitorLabel: 1, visitorType: 1, currentPage: 1, pageHistory: 1, status: 1, startedAt: 1, lastActiveAt: 1, totalDurationSeconds: 1 }
+    }).sort({ lastActiveAt: -1 }).limit(100).toArray();
+    res.json({ online: sessions.filter(session => session.status === 'online').length, sessions });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/admin/projects', async (_req, res, next) => {
@@ -507,6 +632,10 @@ async function start() {
   await db.collection('payment_quotes').createIndex({ customerEmail: 1, status: 1, expiresAt: 1 });
   await db.collection('projects').createIndex({ id: 1 }, { unique: true });
   await db.collection('projects').createIndex({ active: 1, createdAt: -1 });
+  await db.collection('visitor_sessions').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  await db.collection('visitor_sessions').createIndex({ status: 1, lastActiveAt: -1 });
+  await db.collection('visitors').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  await db.collection('push_subscriptions').createIndex({ endpoint: 1 }, { unique: true });
   await seedServiceCatalog();
   app.listen(port, '0.0.0.0', () => console.log(`Netrue listening on ${port}`));
 }

@@ -4,21 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#173b2c">
   <title>Netrue admin</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/netrue-192.png">
+  <link rel="manifest" href="/admin.webmanifest">
   <link rel="stylesheet" href="/admin/assets/admin.css">
+  <link rel="stylesheet" href="/admin/assets/admin-mobile.css">
   <script src="/admin/assets/admin.js" defer></script>
 </head>
 <body>
   <header class="admin-header"><a class="admin-brand" href="/">N<span>.</span> <small>NETRUE ADMIN</small></a><a class="view-site" href="/">View site ↗</a></header>
   <main class="admin-shell">
     <div class="admin-title"><div><p>NETRUE / WORKSPACE</p><h1 id="admin-heading">Quick conversations</h1></div><div class="admin-actions"><button id="new-quote-button" type="button">New payment quote</button><button id="refresh-button" type="button">Refresh</button></div></div>
-    <nav class="admin-tabs" aria-label="Admin sections"><button type="button" class="is-active" data-admin-view="chats">Quick chats</button><button type="button" data-admin-view="projects">Projects</button></nav>
+    <nav class="admin-tabs" aria-label="Admin sections"><button type="button" class="is-active" data-admin-view="chats">Quick chats</button><button type="button" data-admin-view="projects">Projects</button><button type="button" data-admin-view="visitors">Live visitors</button></nav>
+    <section class="admin-device-tools" aria-label="Admin app and alerts"><div><button id="install-app-button" type="button" hidden>Install admin app</button><button id="push-toggle-button" type="button">Enable push alerts</button></div><p id="push-status" role="status">Push alerts are off on this device.</p></section>
     <section id="chat-management">
       <div class="inbox-toolbar"><span id="inbox-count">Loading conversations…</span><label for="status-filter">Show <select id="status-filter"><option value="all">All conversations</option><option value="new">New</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></label></div>
       <div class="inbox-layout"><aside class="thread-list" id="thread-list" aria-label="Quick chat conversations"></aside><section class="thread-detail" id="thread-detail" aria-live="polite"><div class="empty-state"><span>✦</span><h2>Select a conversation</h2><p>Choose a message from the inbox to view its details and reply.</p></div></section></div>
       <p class="admin-footnote">Quick chat messages are saved in MongoDB. Replies are saved here and can be sent by email.</p>
     </section>
+    <section class="visitor-management" id="visitor-management" hidden><div class="visitor-heading"><div><p>LIVE / WEBSITE ACTIVITY</p><h2>Visitors</h2></div><button id="visitor-refresh-button" type="button">Refresh</button></div><p class="visitor-explainer">Anonymous visitor sessions. A visitor is marked offline after two minutes without activity.</p><div class="visitor-stat-grid"><article><span>ONLINE NOW</span><strong id="visitor-online-count">0</strong></article><article><span>RECENT SESSIONS</span><strong id="visitor-session-count">0</strong></article></div><div id="visitor-list" class="visitor-list" aria-live="polite"><p class="loading">Loading visitor activity…</p></div></section>
     <section class="project-management" id="project-management" hidden><div class="project-admin-heading"><div><p>PORTFOLIO / CONTENT</p><h2>Project stories</h2></div><button id="new-project-button" type="button">＋ Add project</button></div><p class="project-admin-note">Manage the project title, description and image link shown on the public website.</p><div id="project-list" class="project-admin-list"><p class="loading">Loading projects…</p></div></section>
   </main>
   <dialog id="quote-dialog" class="quote-dialog"><form id="quote-form"><div class="quote-dialog-head"><div><p>PAYMENTS / AGREED PRICING</p><h2>Create payment quote</h2></div><button type="button" id="close-quote" aria-label="Close">×</button></div><label for="quote-service">Service</label><select id="quote-service" name="serviceId" required></select><label for="quote-price">Agreed price</label><input id="quote-price" name="agreedPrice" type="number" min="0.01" step="0.01" required><div class="quote-price-row"><div><label for="quote-currency-admin">Currency</label><select id="quote-currency-admin" name="currency" required><option value="USD" selected>USD · US Dollar</option><option value="GBP">GBP · Pound sterling</option><option value="NGN">NGN · Nigerian naira</option><option value="BRL">BRL · Brazilian real</option></select></div><div><label for="quote-email">Customer email <span>(optional)</span></label><input id="quote-email" name="email" type="email" maxlength="254"></div></div><label for="quote-name">Customer name <span>(optional)</span></label><input id="quote-name" name="name" maxlength="120"><p id="quote-feedback" role="status"></p><button class="quote-create" type="submit">Create quote</button></form></dialog>

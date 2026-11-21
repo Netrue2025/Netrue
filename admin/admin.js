@@ -97,16 +97,103 @@
   const projectPreview = document.querySelector('#project-preview');
   const chatView = document.querySelector('#chat-management');
   const projectsView = document.querySelector('#project-management');
+  const visitorView = document.querySelector('#visitor-management');
+  const visitorList = document.querySelector('#visitor-list');
+  const pushButton = document.querySelector('#push-toggle-button');
+  const pushStatus = document.querySelector('#push-status');
+  const installButton = document.querySelector('#install-app-button');
+  let visitorTimer;
+  let pushSubscription;
   let projects = [];
-  document.querySelectorAll('[data-admin-view]').forEach(button => button.addEventListener('click', () => {
-    const showingProjects = button.dataset.adminView === 'projects';
-    document.querySelectorAll('[data-admin-view]').forEach(tab => tab.classList.toggle('is-active', tab === button));
-    chatView.hidden = showingProjects; projectsView.hidden = !showingProjects;
-    document.querySelector('#admin-heading').textContent = showingProjects ? 'Project stories' : 'Quick conversations';
-    document.querySelector('#new-quote-button').hidden = showingProjects;
-    document.querySelector('#refresh-button').hidden = showingProjects;
-    if (showingProjects) loadProjects(); else load();
-  }));
+  function selectView(view) {
+    const showingProjects = view === 'projects';
+    const showingVisitors = view === 'visitors';
+    document.querySelectorAll('[data-admin-view]').forEach(tab => tab.classList.toggle('is-active', tab.dataset.adminView === view));
+    chatView.hidden = showingProjects || showingVisitors; projectsView.hidden = !showingProjects; visitorView.hidden = !showingVisitors;
+    document.querySelector('#admin-heading').textContent = showingProjects ? 'Project stories' : showingVisitors ? 'Live visitors' : 'Quick conversations';
+    document.querySelector('#new-quote-button').hidden = showingProjects || showingVisitors;
+    document.querySelector('#refresh-button').hidden = showingProjects || showingVisitors;
+    clearInterval(visitorTimer);
+    if (showingProjects) loadProjects(); else if (showingVisitors) { loadVisitors(); visitorTimer = setInterval(loadVisitors, 15000); } else load();
+  }
+  document.querySelectorAll('[data-admin-view]').forEach(button => button.addEventListener('click', () => selectView(button.dataset.adminView)));
+  if (new URLSearchParams(location.search).get('view') === 'visitors') selectView('visitors');
+
+  function durationLabel(value) {
+    const seconds = Math.max(0, Math.floor(Number(value) || 0));
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+  async function loadVisitors() {
+    try {
+      const data = await api('/api/admin/visitors');
+      document.querySelector('#visitor-online-count').textContent = data.online;
+      document.querySelector('#visitor-session-count').textContent = data.sessions.length;
+      visitorList.replaceChildren();
+      if (!data.sessions.length) { const empty = document.createElement('p'); empty.className = 'empty-list'; empty.textContent = 'No recent visitor sessions. Visitors who allow activity cookies will appear here.'; visitorList.append(empty); return; }
+      for (const session of data.sessions) {
+        const card = document.createElement('article'); card.className = 'visitor-session-card';
+        const heading = document.createElement('div'); heading.className = 'visitor-session-heading';
+        const identity = document.createElement('div');
+        const name = document.createElement('h3'); name.textContent = session.visitorLabel || 'Website visitor';
+        const type = document.createElement('span'); type.textContent = `${session.visitorType || 'visitor'} · ${dateLabel(session.startedAt)}`;
+        identity.append(name, type);
+        const state = document.createElement('span'); state.className = `visitor-state ${session.status === 'online' ? 'online' : ''}`; state.textContent = session.status === 'online' ? 'Online' : 'Offline';
+        heading.append(identity, state);
+        const page = document.createElement('p'); page.className = 'visitor-current-page'; page.textContent = `Browsing ${session.currentPage || '/'}`;
+        const history = Array.isArray(session.pageHistory) ? session.pageHistory : [];
+        const lastPage = history[history.length - 1];
+        const time = document.createElement('div'); time.className = 'visitor-session-meta';
+        const stayed = document.createElement('span'); stayed.textContent = `On this page: ${durationLabel(lastPage?.durationSeconds)}`;
+        const total = document.createElement('span'); total.textContent = `Session total: ${durationLabel(session.totalDurationSeconds)}`;
+        const active = document.createElement('span'); active.textContent = `Last active: ${dateLabel(session.lastActiveAt) || '—'}`;
+        time.append(stayed, total, active); card.append(heading, page, time); visitorList.append(card);
+      }
+    } catch (error) { visitorList.innerHTML = `<p class="admin-error">${escapeHtml(error.message)}</p>`; }
+  }
+  document.querySelector('#visitor-refresh-button').addEventListener('click', loadVisitors);
+
+  function applicationKey(value) {
+    const padding = '='.repeat((4 - value.length % 4) % 4);
+    const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+    return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+  }
+  function updatePushControl() {
+    pushButton.textContent = pushSubscription ? 'Disable push alerts' : 'Enable push alerts';
+    pushStatus.textContent = pushSubscription ? 'Push alerts are enabled on this device.' : 'Push alerts are off on this device.';
+  }
+  async function initDeviceFeatures() {
+    if (!('serviceWorker' in navigator)) { pushStatus.textContent = 'This browser does not support the admin app features.'; pushButton.disabled = true; return; }
+    try {
+      const registration = await navigator.serviceWorker.register('/service-worker.js');
+      pushSubscription = await registration.pushManager.getSubscription(); updatePushControl();
+    } catch { pushStatus.textContent = 'Install or push alerts require HTTPS (or localhost) and a supported browser.'; }
+  }
+  pushButton.addEventListener('click', async () => {
+    pushButton.disabled = true;
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      if (pushSubscription) {
+        await api('/api/admin/push/subscriptions', { method: 'DELETE', body: JSON.stringify({ endpoint: pushSubscription.endpoint }) });
+        await pushSubscription.unsubscribe(); pushSubscription = null; updatePushControl(); return;
+      }
+      if (!('Notification' in window) || !registration.pushManager) throw new Error('Push alerts are not supported by this browser.');
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('Allow notifications in your browser settings to enable alerts.');
+      const config = await api('/api/admin/push/vapid-public-key');
+      if (!config.configured || !config.publicKey) throw new Error('Add VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Railway Variables, then redeploy.');
+      pushSubscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationKey(config.publicKey) });
+      await api('/api/admin/push/subscriptions', { method: 'POST', body: JSON.stringify(pushSubscription) }); updatePushControl();
+    } catch (error) { pushStatus.textContent = error.message; }
+    finally { pushButton.disabled = false; }
+  });
+  window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); window.deferredAdminInstall = event; installButton.hidden = false; });
+  installButton.addEventListener('click', async () => {
+    if (!window.deferredAdminInstall) return;
+    window.deferredAdminInstall.prompt(); await window.deferredAdminInstall.userChoice;
+    window.deferredAdminInstall = null; installButton.hidden = true;
+  });
+  window.addEventListener('appinstalled', () => { installButton.hidden = true; });
+  initDeviceFeatures();
   document.querySelector('#new-quote-button').addEventListener('click', async () => {
     try {
       const services = await api('/api/admin/services');

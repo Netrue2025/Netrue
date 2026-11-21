@@ -23,7 +23,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"], baseUri: ["'self'"], formAction: ["'self'", 'https://checkout.paystack.com'],
-      frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'"], styleSrc: ["'self'"],
+      frameAncestors: ["'none'"], frameSrc: ["'self'", 'https://maps.google.com', 'https://www.google.com'], objectSrc: ["'none'"], scriptSrc: ["'self'"], styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:', 'https:'], connectSrc: ["'self'", 'https://api.paystack.co']
     }
   }

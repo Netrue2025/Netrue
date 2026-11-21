@@ -3,6 +3,7 @@
   const detail = document.querySelector('#thread-detail');
   const filter = document.querySelector('#status-filter');
   const count = document.querySelector('#inbox-count');
+  const search = document.querySelector('#conversation-search');
   let chats = [];
   let selectedReference = null;
 
@@ -19,23 +20,25 @@
     return result;
   }
   function renderList() {
-    count.textContent = `${chats.length} conversation${chats.length === 1 ? '' : 's'}`;
+    const term = search.value.trim().toLowerCase();
+    const visibleChats = chats.filter(chat => !term || [chat.name, chat.email, chat.reference, ...(chat.messages || []).map(message => message.text)].some(value => String(value || '').toLowerCase().includes(term)));
+    count.textContent = `${visibleChats.length} of ${chats.length} conversation${chats.length === 1 ? '' : 's'}`;
     list.replaceChildren();
-    if (!chats.length) {
+    if (!visibleChats.length) {
       const empty = document.createElement('p');
       empty.className = 'empty-list';
-      empty.textContent = 'No conversations match this filter yet.';
+      empty.textContent = chats.length ? 'No chats match your search.' : 'Your inbox is clear. New chats will appear here.';
       list.append(empty);
       return;
     }
-    for (const chat of chats) {
+    for (const chat of visibleChats) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'thread-row';
       button.setAttribute('aria-current', String(chat.reference === selectedReference));
       const last = chat.messages?.[chat.messages.length - 1];
       button.innerHTML = `<span class="thread-row-top"><span class="thread-name">${escapeHtml(chat.name || 'Visitor')}</span><span class="status-chip ${escapeHtml(chat.status)}">${escapeHtml(statusLabel(chat.status))}</span></span><span class="thread-excerpt">${escapeHtml(last?.text || 'No message')}</span><span class="thread-meta"><span>${escapeHtml(chat.reference)}</span><span>${escapeHtml(dateLabel(chat.updatedAt))}</span></span>`;
-      button.addEventListener('click', () => { selectedReference = chat.reference; renderList(); renderDetail(); });
+      button.addEventListener('click', () => { selectedReference = chat.reference; document.querySelector('.inbox-layout').classList.add('show-chat'); renderList(); renderDetail(); });
       list.append(button);
     }
   }
@@ -48,7 +51,8 @@
     const messages = (chat.messages || []).map(message => `<div><div class="message-bubble ${message.sender === 'admin' ? 'admin' : ''}"><span class="message-label">${message.sender === 'admin' ? 'Netrue team' : 'Visitor'}</span>${escapeHtml(message.text)}</div><div class="message-time ${message.sender === 'admin' ? 'admin-time' : ''}">${escapeHtml(dateLabel(message.sentAt))}</div></div>`).join('');
     const latestAdmin = [...(chat.messages || [])].reverse().find(message => message.sender === 'admin');
     const mailto = `mailto:${encodeURIComponent(chat.email)}?subject=${encodeURIComponent(`Re: Netrue quick chat ${chat.reference}`)}${latestAdmin ? `&body=${encodeURIComponent(`${latestAdmin.text}\n\nReference: ${chat.reference}`)}` : ''}`;
-    detail.innerHTML = `<div class="detail-header"><div><h2 class="detail-name">${escapeHtml(chat.name || 'Visitor')}</h2><div class="detail-contact"><a href="mailto:${encodeURIComponent(chat.email)}">${escapeHtml(chat.email)}</a></div></div><label class="detail-status" for="thread-status">${escapeHtml(statusLabel(chat.status))} <select id="thread-status"><option value="new" ${chat.status === 'new' ? 'selected' : ''}>New</option><option value="in_progress" ${chat.status === 'in_progress' ? 'selected' : ''}>In progress</option><option value="resolved" ${chat.status === 'resolved' ? 'selected' : ''}>Resolved</option></select></label></div><p class="detail-reference">REFERENCE / ${escapeHtml(chat.reference)}</p><div class="message-stack">${messages}</div><div class="visitor-card"><span>Received ${escapeHtml(dateLabel(chat.createdAt))}</span><span>Source: website quick chat</span></div><form class="reply-form" id="reply-form"><label for="reply-text">Add a reply to the thread</label><textarea id="reply-text" maxlength="1200" required placeholder="Write a reply to save to this conversation…"></textarea><p class="admin-error" id="reply-error" hidden></p><div class="reply-actions"><a class="email-reply" id="email-reply" href="${escapeHtml(mailto)}">${latestAdmin ? 'Email latest reply ↗' : 'Open email ↗'}</a><button type="submit">Save reply <span aria-hidden="true">↗</span></button></div></form>`;
+    detail.innerHTML = `<button class="mobile-inbox-back" id="mobile-inbox-back" type="button">← All chats</button><div class="detail-header"><div><h2 class="detail-name">${escapeHtml(chat.name || 'Visitor')}</h2><div class="detail-contact"><a href="mailto:${encodeURIComponent(chat.email)}">${escapeHtml(chat.email)}</a></div></div><label class="detail-status" for="thread-status">${escapeHtml(statusLabel(chat.status))} <select id="thread-status"><option value="new" ${chat.status === 'new' ? 'selected' : ''}>New</option><option value="in_progress" ${chat.status === 'in_progress' ? 'selected' : ''}>In progress</option><option value="resolved" ${chat.status === 'resolved' ? 'selected' : ''}>Resolved</option></select></label></div><p class="detail-reference">REFERENCE / ${escapeHtml(chat.reference)}</p><div class="message-stack">${messages}</div><div class="visitor-card"><span>Received ${escapeHtml(dateLabel(chat.createdAt))}</span><span>Source: website quick chat</span></div><form class="reply-form" id="reply-form"><label for="reply-text">Reply to this conversation</label><textarea id="reply-text" maxlength="1200" required placeholder="Write a reply…"></textarea><p class="admin-error" id="reply-error" hidden></p><div class="reply-actions"><a class="email-reply" id="email-reply" href="${escapeHtml(mailto)}">${latestAdmin ? 'Email latest reply ↗' : 'Open email ↗'}</a><button type="submit">Save reply <span aria-hidden="true">↗</span></button></div></form>`;
+    detail.querySelector('#mobile-inbox-back').addEventListener('click', () => document.querySelector('.inbox-layout').classList.remove('show-chat'));
     detail.querySelector('#thread-status').addEventListener('change', async event => {
       try { await api(`/api/admin/quick-chats/${encodeURIComponent(chat.reference)}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.value }) }); await load(); }
       catch (error) { window.alert(error.message); }
@@ -100,8 +104,9 @@
   const visitorView = document.querySelector('#visitor-management');
   const visitorList = document.querySelector('#visitor-list');
   const pushButton = document.querySelector('#push-toggle-button');
-  const pushTestButton = document.querySelector('#push-test-button');
   const pushStatus = document.querySelector('#push-status');
+  const notificationDialog = document.querySelector('#notification-dialog');
+  const notificationIndicator = document.querySelector('#notification-indicator');
   const installButton = document.querySelector('#install-app-button');
   let visitorTimer;
   let pushSubscription;
@@ -166,8 +171,8 @@
     return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
   }
   function updatePushControl() {
-    pushButton.textContent = pushSubscription ? 'Disable push alerts' : 'Enable push alerts';
-    pushTestButton.hidden = !pushSubscription;
+    pushButton.textContent = pushSubscription ? 'Disable notifications on this device' : 'Enable notifications on this device';
+    notificationIndicator.hidden = !pushSubscription;
   }
   async function loadPushStatus() {
     try {
@@ -175,6 +180,7 @@
       if (!data.configured) pushStatus.textContent = 'Push server is missing VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY in Railway Variables.';
       else if (!data.subscriptions) pushStatus.textContent = 'Server is ready, but no admin devices are subscribed yet.';
       else pushStatus.textContent = `Push server ready · ${data.subscriptions} subscribed device${data.subscriptions === 1 ? '' : 's'} · key ${data.fingerprint}`;
+      if (typeof Notification !== 'undefined' && Notification.permission === 'denied') pushStatus.textContent += ' Notifications are blocked in this browser’s site settings.';
     } catch (error) { pushStatus.textContent = `Could not check push setup: ${error.message}`; }
   }
   async function initDeviceFeatures() {
@@ -204,15 +210,9 @@
     } catch (error) { pushStatus.textContent = error.message; }
     finally { pushButton.disabled = false; }
   });
-  pushTestButton.addEventListener('click', async () => {
-    if (!pushSubscription) return;
-    pushTestButton.disabled = true; pushStatus.textContent = 'Sending a test notification to this device…';
-    try {
-      await api('/api/admin/push/test', { method: 'POST', body: JSON.stringify({ endpoint: pushSubscription.endpoint }) });
-      pushStatus.textContent = 'Test sent. Check this device’s notification tray and browser notification settings.';
-    } catch (error) { pushStatus.textContent = error.message; }
-    finally { pushTestButton.disabled = false; }
-  });
+  document.querySelector('#notification-open-button').addEventListener('click', () => notificationDialog.showModal());
+  document.querySelector('#notification-close-button').addEventListener('click', () => notificationDialog.close());
+  notificationDialog.addEventListener('click', event => { if (event.target === notificationDialog) notificationDialog.close(); });
   window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); window.deferredAdminInstall = event; installButton.hidden = false; });
   installButton.addEventListener('click', async () => {
     if (!window.deferredAdminInstall) return;
@@ -294,5 +294,6 @@
     } catch (error) { projectFeedback.textContent = error.message; button.disabled = false; }
   });  document.querySelector('#refresh-button').addEventListener('click', load);
   filter.addEventListener('change', load);
+  search.addEventListener('input', renderList);
   load();
 })();

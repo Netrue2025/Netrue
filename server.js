@@ -8,8 +8,7 @@ const { rateLimit } = require('express-rate-limit');
 const { MongoClient } = require('mongodb');
 const PDFDocument = require('pdfkit');
 const webPush = require('web-push');
-const ip3country = require('ip3country');
-ip3country.init();
+const geoip = require('geoip-country');
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -75,9 +74,15 @@ async function notifyAdmins(title, body, url = '/admin', tag = 'netrue-activity'
 }
 
 function countryFromRequest(req) {
-  const ip = typeof req.ip === 'string' ? req.ip.replace(/^::ffff:/i, '') : '';
+  for (const header of ['cf-ipcountry', 'x-vercel-ip-country', 'cloudfront-viewer-country']) {
+    const country = String(req.get(header) || '').split(',')[0].trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(country) && country !== 'XX' && country !== 'T1') return country;
+  }
+  // Railway sets X-Real-IP from its edge proxy, preserving the original client IP
+  // even when an additional CDN sits in front of the Railway deployment.
+  const ip = String(req.get('x-real-ip') || req.get('cf-connecting-ip') || req.ip || '').split(',')[0].trim().replace(/^::ffff:/i, '');
   if (!ip || ip === '::1' || ip === '127.0.0.1') return null;
-  try { return ip3country.lookupStr(ip) || null; } catch { return null; }
+  try { return geoip.lookup(ip)?.country || null; } catch { return null; }
 }
 
 function requestCookie(req, name) {
@@ -177,7 +182,7 @@ app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
     if (!sessionId) return res.status(400).json({ error: 'Invalid visit session.' });
     const page = validVisitorPage(req.body?.page);
     const previous = await db.collection('visitor_sessions').findOne({ _id: sessionId });
-    const countryCode = previous?.countryCode || countryFromRequest(req);
+    const countryCode = countryFromRequest(req) || previous?.countryCode || null;
     const event = ['visit', 'heartbeat', 'page', 'inactive', 'resume'].includes(req.body?.event) ? req.body.event : 'heartbeat';
     const sessions = db.collection('visitor_sessions');
     const visitors = db.collection('visitors');
@@ -516,24 +521,6 @@ app.delete('/api/admin/push/subscriptions', async (req, res, next) => {
     if (!endpoint.startsWith('https://')) return res.status(400).json({ error: 'A valid subscription endpoint is required.' });
     await db.collection('push_subscriptions').deleteOne({ endpoint });
     res.json({ unsubscribed: true });
-  } catch (error) { next(error); }
-});
-
-app.post('/api/admin/push/test', async (req, res, next) => {
-  try {
-    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
-    if (!endpoint.startsWith('https://')) return res.status(400).json({ error: 'Enable push alerts on this device before sending a test.' });
-    if (!vapidConfigured) return res.status(503).json({ error: 'VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY are not configured on the server.' });
-    const subscription = await db.collection('push_subscriptions').findOne({ endpoint }, { projection: { _id: 0 } });
-    if (!subscription) return res.status(404).json({ error: 'This device subscription was not found. Disable and re-enable push alerts.' });
-    try {
-      await deliverPush(subscription, 'Netrue alerts are working', 'This device can receive admin activity notifications.', '/admin', 'netrue-push-test');
-      res.json({ sent: true });
-    } catch (error) {
-      if (error.statusCode === 404 || error.statusCode === 410) await db.collection('push_subscriptions').deleteOne({ endpoint });
-      console.error('Admin push test failed:', error.statusCode || error.message);
-      res.status(502).json({ error: pushFailureHint(error) });
-    }
   } catch (error) { next(error); }
 });
 

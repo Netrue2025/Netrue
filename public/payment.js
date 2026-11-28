@@ -67,7 +67,17 @@
   function checkoutPayload() { return { serviceIds: [...selected], agreedPrice: amountInput.value, currency: document.querySelector('#payment-currency').value, email: emailInput.value.trim(), name: document.querySelector('#customer-name').value.trim() }; }
   function receiptView(data) {
     clearInterval(pollTimer); form.hidden = true; result.hidden = false; result.className = 'payment-result payment-result-success';
+    if (location.search) history.replaceState(null, '', '/payment.html');
     result.innerHTML = `<div class="receipt-brand"><span class="receipt-mark" aria-hidden="true"><i></i><i></i><i></i><b></b></span><strong>netrue<span>.</span></strong></div><span class="result-icon">✓</span><span class="result-eyebrow">PAYMENT CONFIRMED</span><h2>Thank you.</h2><p>Your payment for <strong>${escapeHtml((data.serviceNames || [data.serviceName || 'your Netrue service']).join(', '))}</strong> was approved.</p><div class="receipt-ready"><span>AMOUNT PAID</span><strong>${escapeHtml(data.amount || '')}</strong><small>Receipt ${escapeHtml(data.receiptNumber)}</small></div><a class="button button-primary receipt-download" href="${escapeHtml(data.receiptUrl || '/api/receipt/download')}">Download your receipt <span aria-hidden="true">↓</span></a><p class="receipt-note">Your receipt is saved in this browser for 48 hours.</p><a class="payment-result-home" href="/">Return to Netrue</a>`;
+    result.querySelector('.payment-result-home').addEventListener('click', async event => {
+      event.preventDefault();
+      selected.clear(); options.querySelectorAll('[data-service-id]').forEach(button => button.setAttribute('aria-pressed', 'false'));
+      amountInput.value = ''; emailInput.value = ''; document.querySelector('#customer-name').value = '';
+      document.querySelector('#payment-currency').value = 'USD'; consent.checked = false;
+      document.querySelector('[name="payment-method"][value="bank_transfer"]').checked = true;
+      updateSelection(); updateProgress(1); form.hidden = false; result.hidden = true;
+      location.assign('/payment/return-home');
+    });
   }
   function renderBank(data) {
     sessionReference = data.reference; updateProgress(3); form.querySelector('[data-stage="3"]').hidden = false;

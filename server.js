@@ -400,6 +400,11 @@ app.get('/api/payments/resume', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/payment/return-home', (req, res) => {
+  res.clearCookie('netrue_payment_session', { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/' });
+  res.redirect(303, '/');
+});
+
 app.post('/api/payments/bank-transfer/:reference/paid', paymentLimiter, async (req, res, next) => {
   try {
     const reference = req.params.reference;

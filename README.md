@@ -10,41 +10,21 @@ This repository contains the Netrue landing page, an inline guided quotation cha
 4. Set `RECEIPT_COOKIE_SECRET` to a unique random secret with at least 32 characters. Set `PUBLIC_URL` to the full public HTTPS Railway domain, for example `https://your-app.up.railway.app`.
 5. Deploy. The app creates MongoDB indexes and inserts missing service catalog entries from `services.json` without overwriting prices already configured in MongoDB.
 
-Production requires `MONGODB_URI`; local development can run in preview mode without it. Without a Paystack secret key, checkout stays unavailable and the rest of the site remains usable. Never commit `.env` or place Paystack secret keys in frontend files.
+Production requires `MONGODB_URI`; local development can run in preview mode without it. Paystack checkout requires its secret key; Netrue Pay requires MongoDB, `RECEIPT_COOKIE_SECRET`, and account details saved in `/admin`. Never commit `.env` or place Paystack secret keys in frontend files.
 
-## Configure payable services
+## Manage checkout services and bank transfer
 
-Service prices were not included in the brief, so every seeded service is disabled and has no amount. No payment can start until Netrue confirms its service prices and currency. Configure each service in MongoDB `services` with:
-
-```json
-{
-  "id": "ai-systems",
-  "name": "AI systems and workflows",
-  "description": "Applied AI features, intelligent workflows, and data-assisted tools.",
-  "amountMinor": null,
-  "currency": null,
-  "active": false
-}
-```
-
-Replace `amountMinor` with the approved amount in the currency's smallest unit, choose the Paystack-supported currency agreed for that service, and set `active` to `true`. Repeat for approved services. For example, in `mongosh`, after setting the actual approved amount and currency:
-
-```js
-db.services.updateOne(
-  { id: "ai-systems" },
-  { $set: { amountMinor: APPROVED_AMOUNT_IN_MINOR_UNITS, currency: "APPROVED_CURRENCY_CODE", active: true } }
-)
-```
-
-Do not leave the placeholder text in a database command. You can also edit `services.json` before deployment; it seeds any missing entries. The catalog is intentionally not editable from the public website.
+- Open `/admin` and choose **Services** to add services. They appear under **Other services** on checkout. The six established services appear as popular options.
+- Choose **Payments** to configure the account name and transfer instructions for Netrue Pay. Enter details on separate lines; bank transfer appears on checkout only after both fields are saved.
+- Transfer requests appear under **Transfer approvals** after a customer selects **I have paid**. Confirm the money reached the account before approving. Approval marks the payment paid and enables the receipt; denial leaves it unpaid.
+- The checkout lets customers select multiple services, enter the agreed total and choose Netrue Pay or Paystack. Paystack and MongoDB must be configured in Railway for checkout to work.
 
 ## Payment and receipt flow
 
-- Create a payment quote from `/admin` by selecting a service and entering the agreed price. Currency defaults to USD; customer name and email are optional. The quote is valid for 14 days and provides a shareable payment link.
-- Opening the payment link loads the quoted service and amount automatically. If the quote has no customer email, checkout asks for one because Paystack requires an email to initialize payment. Name is optional. The server uses the saved quote amount when starting Paystack checkout.
-- After return from Paystack, the server verifies the transaction amount and currency against the saved MongoDB record. Only a verified transaction is marked paid.
-- A PDF receipt is generated from the verified record. The browser receives a signed, HttpOnly cookie that permits repeat downloads in that same browser for 30 days. The payment page also provides a saved-receipt link.
-- A quote is reserved when checkout starts to prevent duplicate use. If Paystack initialization fails, the quote is reopened. A quote whose checkout was started but abandoned needs a fresh quote from the admin.
+- The checkout supports multiple services and an agreed total in USD, GBP, NGN or BRL.
+- Netrue Pay displays the account details configured in admin. After the customer reports the transfer, the payment page waits while an admin approves or denies the request. Only approval issues a receipt.
+- Paystack redirects back to the checkout, where the server verifies the transaction before marking it paid.
+- A signed, HttpOnly browser cookie keeps a payment session or receipt available for 48 hours. The receipt downloads as a branded PDF.
 The chat form validates and stores consented enquiries in the MongoDB `enquiries` collection. Rate limiting is enabled. The visitor can then open WhatsApp or an email draft with their enquiry reference. Email delivery/notifications are not configured, so Netrue should review new enquiry records in MongoDB until an email provider or CRM is connected.
 
 The lightweight quick-chat modal stores conversations in `quick_chats`. The protected admin workspace is at `/admin`. It manages quick chat threads, creates quotes in USD by default (with GBP, NGN and BRL options), and can add, edit or remove public project cards using a title, description and HTTPS image link. Set `ADMIN_USER` and a unique `ADMIN_PASSWORD` of at least 16 characters in Railway Variables to enable it. Admin replies are stored in the thread and the inbox offers an email draft to send to the visitor. Configure an email provider later if you want replies sent directly from the app.

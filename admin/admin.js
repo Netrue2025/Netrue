@@ -101,6 +101,12 @@
   const projectPreview = document.querySelector('#project-preview');
   const chatView = document.querySelector('#chat-management');
   const projectsView = document.querySelector('#project-management');
+  const servicesView = document.querySelector('#services-management');
+  const paymentsView = document.querySelector('#payments-management');
+  const serviceForm = document.querySelector('#service-form');
+  const serviceList = document.querySelector('#service-list');
+  const bankSettingsForm = document.querySelector('#bank-settings-form');
+  const pendingPaymentsList = document.querySelector('#pending-payments-list');
   const visitorView = document.querySelector('#visitor-management');
   const visitorList = document.querySelector('#visitor-list');
   const pushButton = document.querySelector('#push-toggle-button');
@@ -109,21 +115,63 @@
   const notificationIndicator = document.querySelector('#notification-indicator');
   const installButton = document.querySelector('#install-app-button');
   let visitorTimer;
+  let paymentTimer;
   let pushSubscription;
   let projects = [];
   function selectView(view) {
     const showingProjects = view === 'projects';
     const showingVisitors = view === 'visitors';
+    const showingServices = view === 'services';
+    const showingPayments = view === 'payments';
     document.querySelectorAll('[data-admin-view]').forEach(tab => tab.classList.toggle('is-active', tab.dataset.adminView === view));
-    chatView.hidden = showingProjects || showingVisitors; projectsView.hidden = !showingProjects; visitorView.hidden = !showingVisitors;
-    document.querySelector('#admin-heading').textContent = showingProjects ? 'Project stories' : showingVisitors ? 'Live visitors' : 'Quick conversations';
-    document.querySelector('#new-quote-button').hidden = showingProjects || showingVisitors;
-    document.querySelector('#refresh-button').hidden = showingProjects || showingVisitors;
-    clearInterval(visitorTimer);
-    if (showingProjects) loadProjects(); else if (showingVisitors) { loadVisitors(); visitorTimer = setInterval(loadVisitors, 15000); } else load();
+    chatView.hidden = showingProjects || showingVisitors || showingServices || showingPayments; projectsView.hidden = !showingProjects; visitorView.hidden = !showingVisitors; servicesView.hidden = !showingServices; paymentsView.hidden = !showingPayments;
+    document.querySelector('#admin-heading').textContent = showingProjects ? 'Project stories' : showingVisitors ? 'Live visitors' : showingServices ? 'Payment services' : showingPayments ? 'Payment settings' : 'Quick conversations';
+    document.querySelector('#new-quote-button').hidden = showingProjects || showingVisitors || showingServices || showingPayments;
+    document.querySelector('#refresh-button').hidden = showingProjects || showingVisitors || showingServices || showingPayments;
+    clearInterval(visitorTimer); clearInterval(paymentTimer);
+    if (showingProjects) loadProjects(); else if (showingVisitors) { loadVisitors(); visitorTimer = setInterval(loadVisitors, 15000); } else if (showingServices) loadAdminServices(); else if (showingPayments) { loadPaymentSettings(); loadPendingPayments(); paymentTimer = setInterval(loadPendingPayments, 10000); } else load();
   }
   document.querySelectorAll('[data-admin-view]').forEach(button => button.addEventListener('click', () => selectView(button.dataset.adminView)));
   if (new URLSearchParams(location.search).get('view') === 'visitors') selectView('visitors');
+  if (new URLSearchParams(location.search).get('view') === 'payments') selectView('payments');
+
+  async function loadAdminServices() {
+    try {
+      const services = await api('/api/admin/services'); serviceList.replaceChildren();
+      for (const service of services) { const row = document.createElement('article'); row.className = 'admin-catalog-row'; const title = document.createElement('strong'); title.textContent = service.name; const note = document.createElement('span'); note.textContent = service.description || 'Available for agreed-price checkout'; row.append(title, note); serviceList.append(row); }
+    } catch (error) { serviceList.innerHTML = `<p class="admin-error">${escapeHtml(error.message)}</p>`; }
+  }
+  document.querySelector('#new-service-button').addEventListener('click', () => { serviceForm.hidden = !serviceForm.hidden; if (!serviceForm.hidden) serviceForm.elements.name.focus(); });
+  serviceForm.addEventListener('submit', async event => {
+    event.preventDefault(); const feedback = document.querySelector('#service-feedback'); const button = serviceForm.querySelector('[type="submit"]'); button.disabled = true; feedback.textContent = 'Saving service…';
+    try { await api('/api/admin/services', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(serviceForm))) }); serviceForm.reset(); serviceForm.hidden = true; feedback.textContent = ''; await loadAdminServices(); }
+    catch (error) { feedback.textContent = error.message; } finally { button.disabled = false; }
+  });
+  async function loadPaymentSettings() {
+    try { const data = await api('/api/admin/payment-settings'); bankSettingsForm.elements.bankAccountName.value = data.bankAccountName; bankSettingsForm.elements.bankAccountDetails.value = data.bankAccountDetails; }
+    catch (error) { document.querySelector('#bank-settings-feedback').textContent = error.message; }
+  }
+  bankSettingsForm.addEventListener('submit', async event => {
+    event.preventDefault(); const feedback = document.querySelector('#bank-settings-feedback'); const button = bankSettingsForm.querySelector('[type="submit"]'); button.disabled = true;
+    try { const data = await api('/api/admin/payment-settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(bankSettingsForm))) }); feedback.textContent = data.bankTransferEnabled ? 'Account details saved. Netrue Pay is available to customers.' : 'Account details cleared. Netrue Pay is disabled.'; }
+    catch (error) { feedback.textContent = error.message; } finally { button.disabled = false; }
+  });
+  async function loadPendingPayments() {
+    try {
+      const payments = await api('/api/admin/payments/pending'); pendingPaymentsList.replaceChildren();
+      if (!payments.length) { const empty = document.createElement('p'); empty.className = 'empty-list'; empty.textContent = 'No transfers are waiting for approval.'; pendingPaymentsList.append(empty); return; }
+      for (const payment of payments) {
+        const card = document.createElement('article'); card.className = 'pending-payment-card';
+        const title = document.createElement('strong'); title.textContent = payment.serviceName || (payment.serviceNames || []).join(', ');
+        const amount = document.createElement('b'); amount.textContent = new Intl.NumberFormat(undefined, { style: 'currency', currency: payment.currency }).format(payment.amountMinor / (10 ** new Intl.NumberFormat('en', { style: 'currency', currency: payment.currency }).resolvedOptions().maximumFractionDigits));
+        const meta = document.createElement('small'); meta.textContent = `${payment.customerName || 'Customer'} · ${payment.customerEmail || ''} · ${payment.reference}`;
+        const actions = document.createElement('div'); actions.className = 'pending-payment-actions';
+        for (const actionName of ['approve','deny']) { const button = document.createElement('button'); button.type = 'button'; button.textContent = actionName === 'approve' ? 'Approve & issue receipt' : 'Deny'; button.className = actionName === 'approve' ? 'quote-create' : 'payment-deny'; button.addEventListener('click', async () => { button.disabled = true; try { await api(`/api/admin/payments/${encodeURIComponent(payment.reference)}/review`, { method: 'PATCH', body: JSON.stringify({ action: actionName }) }); await loadPendingPayments(); } catch (error) { window.alert(error.message); button.disabled = false; } }); actions.append(button); }
+        card.append(title, amount, meta, actions); pendingPaymentsList.append(card);
+      }
+    } catch (error) { pendingPaymentsList.innerHTML = `<p class="admin-error">${escapeHtml(error.message)}</p>`; }
+  }
+  document.querySelector('#refresh-payments-button').addEventListener('click', () => { loadPaymentSettings(); loadPendingPayments(); });
 
   function durationLabel(value) {
     const seconds = Math.max(0, Math.floor(Number(value) || 0));

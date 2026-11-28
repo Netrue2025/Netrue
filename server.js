@@ -133,6 +133,24 @@ function cookieReference(req) {
   return safeSecretEqual(signature, expected) ? reference : null;
 }
 
+function paymentSessionReference(req) {
+  const raw = (req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith('netrue_payment_session='))?.slice('netrue_payment_session='.length);
+  if (!raw) return null;
+  const [reference, signature] = decodeURIComponent(raw).split('.');
+  if (!validReference(reference) || !signature) return null;
+  const expected = crypto.createHmac('sha256', process.env.RECEIPT_COOKIE_SECRET || '').update(`session:${reference}`).digest('hex');
+  return safeSecretEqual(signature, expected) ? reference : null;
+}
+
+function setPaymentSessionCookie(res, reference, req) {
+  const signature = crypto.createHmac('sha256', process.env.RECEIPT_COOKIE_SECRET || '').update(`session:${reference}`).digest('hex');
+  res.cookie('netrue_payment_session', `${reference}.${signature}`, { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/', maxAge: 48 * 60 * 60 * 1000 });
+}
+
+function receiptCookieOptions(req) {
+  return { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/api/receipt', maxAge: 48 * 60 * 60 * 1000 };
+}
+
 function publicService(service) {
   return {
     id: service.id,
@@ -301,6 +319,120 @@ app.post('/api/payment-quotes/lookup', paymentLimiter, async (req, res, next) =>
   } catch (error) { next(error); }
 });
 
+function normalizeCheckout(req) {
+  const ids = [...new Set(Array.isArray(req.body?.serviceIds) ? req.body.serviceIds : [])].filter(id => typeof id === 'string' && /^[a-z0-9-]{2,80}$/.test(id));
+  const currency = typeof req.body?.currency === 'string' ? req.body.currency.toUpperCase() : 'USD';
+  const amountMinor = amountToMinor(String(req.body?.agreedPrice || ''), currency);
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 120) : '';
+  if (!ids.length || ids.length > 20) return { error: 'Select at least one valid service.' };
+  if (!['USD', 'GBP', 'NGN', 'BRL'].includes(currency) || !amountMinor) return { error: 'Enter the agreed total price in a supported currency.' };
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'Enter a valid email address for your receipt.' };
+  return { ids, currency, amountMinor, email, name };
+}
+
+async function preparePayment(body, method) {
+  const checked = normalizeCheckout({ body });
+  if (checked.error) return checked;
+  const services = await db.collection('services').find({ id: { $in: checked.ids } }, { projection: { _id: 0, id: 1, name: 1 } }).toArray();
+  if (services.length !== checked.ids.length) return { error: 'One or more selected services are unavailable.' };
+  const reference = `NTR-${crypto.randomUUID()}`;
+  const now = new Date();
+  const payment = {
+    reference, serviceIds: services.map(service => service.id), serviceNames: services.map(service => service.name),
+    serviceName: services.map(service => service.name).join(', '), amountMinor: checked.amountMinor, currency: checked.currency,
+    customerName: checked.name || 'Customer', customerEmail: checked.email, method,
+    status: method === 'bank_transfer' ? 'awaiting_customer_payment' : 'pending', createdAt: now
+  };
+  await db.collection('payments').insertOne(payment);
+  return { payment, ...checked };
+}
+
+app.post('/api/payments/initialize-multi', paymentLimiter, async (req, res, next) => {
+  try {
+    if (!db) return res.status(503).json({ error: 'Checkout needs MongoDB.' });
+    if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ error: 'Paystack is not configured yet. Choose bank transfer or contact Netrue.' });
+    if (!process.env.RECEIPT_COOKIE_SECRET || process.env.RECEIPT_COOKIE_SECRET.length < 32 || !process.env.PUBLIC_URL || !/^https:\/\//.test(process.env.PUBLIC_URL)) return res.status(503).json({ error: 'Secure checkout is not configured yet.' });
+    const prepared = await preparePayment(req.body, 'paystack');
+    if (prepared.error) return res.status(400).json({ error: prepared.error });
+    const { payment, email, name } = prepared;
+    const callbackUrl = new URL('/payment.html', process.env.PUBLIC_URL); callbackUrl.searchParams.set('reference', payment.reference);
+    try {
+      const checkout = await paystackRequest('https://api.paystack.co/transaction/initialize', { method: 'POST', body: JSON.stringify({ email, amount: payment.amountMinor, currency: payment.currency, reference: payment.reference, callback_url: callbackUrl.toString(), metadata: { customer_name: name || 'Customer', service_names: payment.serviceNames } }) });
+      await db.collection('payments').updateOne({ reference: payment.reference }, { $set: { authorizationUrl: checkout.authorization_url, paystackAccessCode: checkout.access_code } });
+      setPaymentSessionCookie(res, payment.reference, req);
+      res.json({ authorizationUrl: checkout.authorization_url, reference: payment.reference });
+    } catch (error) { await db.collection('payments').updateOne({ reference: payment.reference }, { $set: { status: 'initialization_failed' } }); throw error; }
+  } catch (error) { next(error); }
+});
+
+app.get('/api/payment-settings', async (_req, res, next) => {
+  try {
+    const settings = db ? await db.collection('site_settings').findOne({ _id: 'payments' }) : null;
+    res.json({ bankTransferEnabled: Boolean(settings?.bankAccountName && settings?.bankAccountDetails), paystackEnabled: Boolean(process.env.PAYSTACK_SECRET_KEY), bankAccountName: settings?.bankAccountName || '', bankAccountDetails: settings?.bankAccountDetails || '' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/payments/bank-transfer', paymentLimiter, async (req, res, next) => {
+  try {
+    if (!db) return res.status(503).json({ error: 'Checkout needs MongoDB.' });
+    if (!process.env.RECEIPT_COOKIE_SECRET || process.env.RECEIPT_COOKIE_SECRET.length < 32) return res.status(503).json({ error: 'Secure checkout is not configured yet.' });
+    const settings = await db.collection('site_settings').findOne({ _id: 'payments' });
+    if (!settings?.bankAccountName || !settings?.bankAccountDetails) return res.status(503).json({ error: 'Bank transfer is not available yet. Choose Paystack or contact Netrue.' });
+    const prepared = await preparePayment(req.body, 'bank_transfer');
+    if (prepared.error) return res.status(400).json({ error: prepared.error });
+    const { payment, bankAccountName, bankAccountDetails } = { ...prepared, ...settings };
+    setPaymentSessionCookie(res, payment.reference, req);
+    res.status(201).json({ reference: payment.reference, amount: formatCurrencyMinor(payment.amountMinor, payment.currency), serviceNames: payment.serviceNames, bankAccountName, bankAccountDetails, status: payment.status });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/payments/resume', async (req, res, next) => {
+  try {
+    if (!db) return res.status(204).end();
+    const reference = paymentSessionReference(req);
+    if (!reference) return res.status(204).end();
+    const payment = await db.collection('payments').findOne({ reference, createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) } });
+    if (!payment || payment.status === 'cancelled') return res.status(204).end();
+    const settings = await db.collection('site_settings').findOne({ _id: 'payments' });
+    if (payment.status === 'paid') res.cookie('netrue_receipt', receiptCookieValue(reference), receiptCookieOptions(req));
+    res.json({ reference, method: payment.method, serviceNames: payment.serviceNames || [payment.serviceName], amount: formatCurrencyMinor(payment.amountMinor, payment.currency), status: payment.status, receiptNumber: payment.receiptNumber || null, receiptUrl: payment.status === 'paid' ? '/api/receipt/download' : null, bankAccountName: settings?.bankAccountName || '', bankAccountDetails: settings?.bankAccountDetails || '' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/payments/bank-transfer/:reference/paid', paymentLimiter, async (req, res, next) => {
+  try {
+    const reference = req.params.reference;
+    if (paymentSessionReference(req) !== reference) return res.status(403).json({ error: 'This payment session has expired. Reopen the payment link or contact Netrue.' });
+    const payment = await db.collection('payments').findOne({ reference, method: 'bank_transfer', status: 'awaiting_customer_payment' });
+    if (!payment) return res.status(409).json({ error: 'This payment is no longer waiting for payment.' });
+    await db.collection('payments').updateOne({ reference, status: 'awaiting_customer_payment' }, { $set: { status: 'awaiting_approval', customerMarkedPaidAt: new Date() } });
+    void notifyAdmins('Bank transfer needs approval', `${payment.serviceName}: ${formatCurrencyMinor(payment.amountMinor, payment.currency)} (${reference}).`, '/admin?view=payments', `transfer-${reference}`);
+    res.json({ status: 'awaiting_approval' });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/payments/bank-transfer/:reference/status', async (req, res, next) => {
+  try {
+    const reference = req.params.reference;
+    if (paymentSessionReference(req) !== reference) return res.status(403).json({ error: 'Payment session expired.' });
+    const payment = await db.collection('payments').findOne({ reference, method: 'bank_transfer' });
+    if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+    if (payment.status === 'paid') res.cookie('netrue_receipt', receiptCookieValue(reference), receiptCookieOptions(req));
+    res.json({ status: payment.status, receiptNumber: payment.receiptNumber || null, receiptUrl: payment.status === 'paid' ? '/api/receipt/download' : null });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/payments/bank-transfer/:reference/cancel', async (req, res, next) => {
+  try {
+    const reference = req.params.reference;
+    if (paymentSessionReference(req) !== reference) return res.status(403).json({ error: 'Payment session expired.' });
+    await db.collection('payments').updateOne({ reference, method: 'bank_transfer', status: { $in: ['awaiting_customer_payment', 'awaiting_approval'] } }, { $set: { status: 'cancelled', cancelledAt: new Date() } });
+    res.clearCookie('netrue_payment_session', { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/' });
+    res.json({ cancelled: true });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/payments/initialize', paymentLimiter, async (req, res, next) => {
   try {
     if (!db) return res.status(503).json({ error: 'Checkout needs MongoDB. Add a valid MONGODB_URI to your local .env file.' });
@@ -392,7 +524,7 @@ app.get('/api/payments/verify/:reference', verifyLimiter, async (req, res, next)
     }
     const confirmed = await db.collection('payments').findOne({ reference, status: 'paid' });
     if (!confirmed) return res.status(409).json({ error: 'Payment confirmation is being processed. Refresh in a moment.' });
-    res.cookie('netrue_receipt', receiptCookieValue(reference), { httpOnly: true, secure: process.env.NODE_ENV === 'production' || Boolean(req.secure), sameSite: 'lax', path: '/api/receipt', maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.cookie('netrue_receipt', receiptCookieValue(reference), receiptCookieOptions(req));
     res.json({ status: 'paid', reference, receiptNumber: confirmed.receiptNumber, serviceName: confirmed.serviceName, amount: formatCurrencyMinor(confirmed.amountMinor, confirmed.currency), receiptUrl: '/api/receipt/download' });
   } catch (error) { next(error); }
 });
@@ -435,7 +567,8 @@ function streamReceipt(res, payment) {
     pdf.moveTo(54, y + 1).lineTo(541, y + 1).strokeColor('#dce2dd').lineWidth(1).stroke();
     pdf.fillColor('#253c2d').font('Helvetica-Bold').fontSize(12).text('Thank you for choosing Netrue.', 54, y + 25);
     pdf.fillColor('#707b72').font('Helvetica').fontSize(9).text('Questions about this receipt? Contact info@netrue.io  ·  netrue.io', 54, y + 47, { width: 487 });
-    pdf.fillColor('#a0a79f').font('Helvetica').fontSize(8).text('This receipt confirms payment processed securely by Paystack.', 54, 773, { width: 487, align: 'center' });
+    const paymentNote = payment.method === 'bank_transfer' ? 'This receipt confirms a bank transfer reviewed and approved by Netrue.' : 'This receipt confirms payment processed securely by Paystack.';
+    pdf.fillColor('#a0a79f').font('Helvetica').fontSize(8).text(paymentNote, 54, 773, { width: 487, align: 'center' });
     pdf.end();
 }
 
@@ -488,8 +621,56 @@ app.use('/admin/assets', adminLimiter, requireAdmin, express.static(adminDirecto
 app.use('/api/admin', adminLimiter, requireAdmin);
 
 app.get('/api/admin/services', async (_req, res, next) => {
-  try { res.json(await db.collection('services').find({}, { projection: { _id: 0, id: 1, name: 1, currency: 1 } }).sort({ name: 1 }).toArray()); }
+  try { res.json(await db.collection('services').find({}, { projection: { _id: 0, id: 1, name: 1, description: 1, currency: 1 } }).sort({ name: 1 }).toArray()); }
   catch (error) { next(error); }
+});
+
+app.post('/api/admin/services', async (req, res, next) => {
+  try {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+    const id = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 70);
+    if (name.length < 2 || name.length > 100 || !id) return res.status(400).json({ error: 'Enter a service name between 2 and 100 characters.' });
+    if (description.length > 500) return res.status(400).json({ error: 'Description must be 500 characters or fewer.' });
+    const service = { id, name, description, amountMinor: null, currency: null, active: true, createdAt: new Date() };
+    try { await db.collection('services').insertOne(service); } catch (error) { if (error.code === 11000) return res.status(409).json({ error: 'A service with that name already exists.' }); throw error; }
+    res.status(201).json({ id, name, description });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/payment-settings', async (_req, res, next) => {
+  try { const settings = await db.collection('site_settings').findOne({ _id: 'payments' }); res.json({ bankAccountName: settings?.bankAccountName || '', bankAccountDetails: settings?.bankAccountDetails || '' }); }
+  catch (error) { next(error); }
+});
+
+app.put('/api/admin/payment-settings', async (req, res, next) => {
+  try {
+    const bankAccountName = typeof req.body?.bankAccountName === 'string' ? req.body.bankAccountName.trim().slice(0, 120) : '';
+    const bankAccountDetails = typeof req.body?.bankAccountDetails === 'string' ? req.body.bankAccountDetails.trim().slice(0, 1200) : '';
+    if (Boolean(bankAccountName) !== Boolean(bankAccountDetails)) return res.status(400).json({ error: 'Enter both account name and account details, or clear both to disable bank transfer.' });
+    await db.collection('site_settings').updateOne({ _id: 'payments' }, { $set: { bankAccountName, bankAccountDetails, updatedAt: new Date() } }, { upsert: true });
+    res.json({ saved: true, bankTransferEnabled: Boolean(bankAccountName && bankAccountDetails) });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/payments/pending', async (_req, res, next) => {
+  try { res.json(await db.collection('payments').find({ method: 'bank_transfer', status: 'awaiting_approval' }, { projection: { _id: 0, reference: 1, serviceName: 1, serviceNames: 1, amountMinor: 1, currency: 1, customerName: 1, customerEmail: 1, customerMarkedPaidAt: 1 } }).sort({ customerMarkedPaidAt: 1 }).limit(100).toArray()); }
+  catch (error) { next(error); }
+});
+
+app.patch('/api/admin/payments/:reference/review', async (req, res, next) => {
+  try {
+    const action = req.body?.action;
+    if (!['approve', 'deny'].includes(action)) return res.status(400).json({ error: 'Choose approve or deny.' });
+    const reference = req.params.reference;
+    const payment = await db.collection('payments').findOne({ reference, method: 'bank_transfer', status: 'awaiting_approval' });
+    if (!payment) return res.status(404).json({ error: 'This transfer is no longer awaiting approval.' });
+    const now = new Date();
+    const set = action === 'approve' ? { status: 'paid', paidAt: now, verifiedAt: now, receiptNumber: `NTR-${now.toISOString().slice(0, 10).replaceAll('-', '')}-${reference.slice(-8).toUpperCase()}`, reviewedBy: req.authUser || 'admin' } : { status: 'denied', deniedAt: now, reviewedBy: req.authUser || 'admin' };
+    const result = await db.collection('payments').updateOne({ reference, status: 'awaiting_approval' }, { $set: set });
+    if (!result.modifiedCount) return res.status(409).json({ error: 'This transfer was already reviewed.' });
+    res.json({ status: set.status });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/admin/push/vapid-public-key', (_req, res) => res.json({ configured: vapidConfigured, publicKey: vapidConfigured ? process.env.VAPID_PUBLIC_KEY : null }));

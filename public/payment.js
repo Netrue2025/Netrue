@@ -15,6 +15,7 @@
   let stage = 1;
   let sessionReference = null;
   let pollTimer = null;
+  const freshStartKey = 'netrue_fresh_payment_start';
   const money = (value, currency) => new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[ch]);
   function updateProgress(step) {
@@ -71,6 +72,7 @@
     result.innerHTML = `<div class="receipt-brand"><span class="receipt-mark" aria-hidden="true"><i></i><i></i><i></i><b></b></span><strong>netrue<span>.</span></strong></div><span class="result-icon">✓</span><span class="result-eyebrow">PAYMENT CONFIRMED</span><h2>Thank you.</h2><p>Your payment for <strong>${escapeHtml((data.serviceNames || [data.serviceName || 'your Netrue service']).join(', '))}</strong> was approved.</p><div class="receipt-ready"><span>AMOUNT PAID</span><strong>${escapeHtml(data.amount || '')}</strong><small>Receipt ${escapeHtml(data.receiptNumber)}</small></div><a class="button button-primary receipt-download" href="${escapeHtml(data.receiptUrl || '/api/receipt/download')}">Download your receipt <span aria-hidden="true">↓</span></a><p class="receipt-note">Your receipt is saved in this browser for 48 hours.</p><a class="payment-result-home" href="/">Return to Netrue</a>`;
     result.querySelector('.payment-result-home').addEventListener('click', async event => {
       event.preventDefault();
+      try { localStorage.setItem(freshStartKey, '1'); } catch {}
       selected.clear(); options.querySelectorAll('[data-service-id]').forEach(button => button.setAttribute('aria-pressed', 'false'));
       amountInput.value = ''; emailInput.value = ''; document.querySelector('#customer-name').value = '';
       document.querySelector('#payment-currency').value = 'USD'; consent.checked = false;
@@ -99,13 +101,15 @@
     continueButton.disabled = true; continueButton.textContent = 'Preparing payment…';
     try {
       const method = document.querySelector('[name="payment-method"]:checked').value; const payload = checkoutPayload();
-      if (method === 'paystack') { const data = await api('/api/payments/initialize-multi', payload); location.assign(data.authorizationUrl); return; }
-      const data = await api('/api/payments/bank-transfer', payload); renderBank(data);
+      if (method === 'paystack') { const data = await api('/api/payments/initialize-multi', payload); try { localStorage.removeItem(freshStartKey); } catch {} location.assign(data.authorizationUrl); return; }
+      const data = await api('/api/payments/bank-transfer', payload); try { localStorage.removeItem(freshStartKey); } catch {} renderBank(data);
     } catch (e) { error.textContent = e.message; error.hidden = false; }
     finally { continueButton.textContent = 'Continue to payment →'; updateContinue(); }
   });
   async function restoreSession() {
     const params = new URLSearchParams(location.search); const paystackRef = params.get('reference') || params.get('trxref');
+    let forceFresh = false; try { forceFresh = localStorage.getItem(freshStartKey) === '1'; } catch {}
+    if (forceFresh) { if (paystackRef) history.replaceState(null, '', '/payment.html'); updateProgress(1); return; }
     if (paystackRef) { form.hidden = true; result.hidden = false; result.innerHTML = '<span class="result-icon result-wait">…</span><span class="result-eyebrow">PAYMENT STATUS</span><h2>Confirming your payment</h2><p>We are checking your transaction with Paystack.</p>'; try { const data = await api(`/api/payments/verify/${encodeURIComponent(paystackRef)}`); receiptView(data); } catch (e) { result.innerHTML = `<span class="result-eyebrow">PAYMENT STATUS</span><h2>We could not confirm this yet.</h2><p>${escapeHtml(e.message)}</p><a href="mailto:info@netrue.io">Contact info@netrue.io</a><a class="payment-result-home" href="/payment.html">Return to checkout</a>`; } return; }
     try { const data = await api('/api/payments/resume'); if (!data) return; if (data.status === 'paid') { receiptView(data); return; } if (data.method === 'bank_transfer' && ['awaiting_approval','awaiting_customer_payment','denied'].includes(data.status)) renderBank(data); } catch {}
   }

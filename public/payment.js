@@ -2,7 +2,6 @@
   const form = document.querySelector('#payment-form');
   if (!form) return;
   const options = document.querySelector('#service-options');
-  const otherServices = document.querySelector('#other-services');
   const stages = [...document.querySelectorAll('.payment-stage')];
   const selected = new Set();
   const result = document.querySelector('#payment-result');
@@ -47,17 +46,14 @@
     paystackOption.hidden = !paymentSettings.paystackEnabled; paystackOption.querySelector('input').disabled = !paymentSettings.paystackEnabled;
     if (!paymentSettings.bankTransferEnabled && paymentSettings.paystackEnabled) paystackOption.querySelector('input').checked = true;
     if (!paymentSettings.bankTransferEnabled && !paymentSettings.paystackEnabled) throw new Error('Payments are not available right now. Please contact info@netrue.io.');
-    services = await response.json(); options.replaceChildren(); otherServices.replaceChildren();
+    services = await response.json(); options.replaceChildren();
     const popularIds = ['ai-systems','iot-connected-systems','embedded-engineering','smart-agriculture','digital-products','research-prototyping'];
     const popular = services.filter(item => popularIds.includes(item.id));
-    const extra = services.filter(item => !popularIds.includes(item.id));
-    popular.forEach(item => options.append(serviceButton(item)));
-    if (!popular.length) options.append(Object.assign(document.createElement('p'), { className: 'service-loading', textContent: 'No popular services yet.' }));
-    for (const service of extra) { const option = document.createElement('option'); option.value = service.id; option.textContent = service.name; otherServices.append(option); }
-    if (!extra.length) { const option = document.createElement('option'); option.textContent = 'No additional services yet'; option.disabled = true; otherServices.append(option); }
-    otherServices.addEventListener('change', () => { [...otherServices.options].forEach(item => { if (item.value) item.selected ? selected.add(item.value) : selected.delete(item.value); }); updateSelection(); });
+    const allServices = [...popular, ...services.filter(item => !popularIds.includes(item.id)).sort((a, b) => a.name.localeCompare(b.name))];
+    allServices.forEach(item => options.append(serviceButton(item)));
+    if (!allServices.length) options.append(Object.assign(document.createElement('p'), { className: 'service-loading', textContent: 'No services are available yet.' }));
     const quote = new URLSearchParams(location.search).get('quote');
-    if (quote) { try { const response = await fetch('/api/payment-quotes/lookup', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ reference: quote }) }); const data = await response.json(); if (response.ok) { selected.add(data.serviceId); amountInput.value = data.agreedPrice; document.querySelector('#payment-currency').value = data.currency; const option = [...otherServices.options].find(item => item.value === data.serviceId); if (option) option.selected = true; } } catch {} }
+    if (quote) { try { const response = await fetch('/api/payment-quotes/lookup', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ reference: quote }) }); const data = await response.json(); if (response.ok) { selected.add(data.serviceId); amountInput.value = data.agreedPrice; document.querySelector('#payment-currency').value = data.currency; } } catch {} }
     updateSelection();
   }
   function amountFormatted() { const n = Number(amountInput.value); return Number.isFinite(n) && n > 0 ? money(n, document.querySelector('#payment-currency').value) : '—'; }

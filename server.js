@@ -166,7 +166,7 @@ async function seedServiceCatalog() {
   const services = JSON.parse(fs.readFileSync(path.join(__dirname, 'services.json'), 'utf8'));
   const collection = db.collection('services');
   for (const service of services) {
-    await collection.updateOne({ id: service.id }, { $setOnInsert: service }, { upsert: true });
+    await collection.updateOne({ id: service.id }, { $setOnInsert: { ...service, catalogVisible: true } }, { upsert: true });
   }
 }
 
@@ -243,7 +243,7 @@ app.post('/api/visitor/pulse', visitorLimiter, async (req, res, next) => {
 app.get('/api/services', async (_req, res, next) => {
   try {
     const services = db
-      ? await db.collection('services').find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray()
+      ? await db.collection('services').find({ $or: [{ catalogVisible: { $exists: false } }, { catalogVisible: true }] }, { projection: { _id: 0 } }).sort({ name: 1 }).toArray()
       : JSON.parse(fs.readFileSync(path.join(__dirname, 'services.json'), 'utf8'));
     res.json(services.map(publicService));
   } catch (error) { next(error); }
@@ -334,7 +334,7 @@ function normalizeCheckout(req) {
 async function preparePayment(body, method) {
   const checked = normalizeCheckout({ body });
   if (checked.error) return checked;
-  const services = await db.collection('services').find({ id: { $in: checked.ids } }, { projection: { _id: 0, id: 1, name: 1 } }).toArray();
+  const services = await db.collection('services').find({ id: { $in: checked.ids }, $or: [{ catalogVisible: { $exists: false } }, { catalogVisible: true }] }, { projection: { _id: 0, id: 1, name: 1 } }).toArray();
   if (services.length !== checked.ids.length) return { error: 'One or more selected services are unavailable.' };
   const reference = `NTR-${crypto.randomUUID()}`;
   const now = new Date();
@@ -621,7 +621,12 @@ app.use('/admin/assets', adminLimiter, requireAdmin, express.static(adminDirecto
 app.use('/api/admin', adminLimiter, requireAdmin);
 
 app.get('/api/admin/services', async (_req, res, next) => {
-  try { res.json(await db.collection('services').find({}, { projection: { _id: 0, id: 1, name: 1, description: 1, currency: 1 } }).sort({ name: 1 }).toArray()); }
+  try { res.json(await db.collection('services').find({ $or: [{ catalogVisible: { $exists: false } }, { catalogVisible: true }] }, { projection: { _id: 0, id: 1, name: 1, description: 1, currency: 1, catalogVisible: 1 } }).sort({ name: 1 }).toArray()); }
+  catch (error) { next(error); }
+});
+
+app.get('/api/admin/service-catalog', async (_req, res, next) => {
+  try { res.json(await db.collection('services').find({}, { projection: { _id: 0, id: 1, name: 1, description: 1, catalogVisible: 1 } }).sort({ name: 1 }).toArray()); }
   catch (error) { next(error); }
 });
 
@@ -632,9 +637,40 @@ app.post('/api/admin/services', async (req, res, next) => {
     const id = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 70);
     if (name.length < 2 || name.length > 100 || !id) return res.status(400).json({ error: 'Enter a service name between 2 and 100 characters.' });
     if (description.length > 500) return res.status(400).json({ error: 'Description must be 500 characters or fewer.' });
-    const service = { id, name, description, amountMinor: null, currency: null, active: true, createdAt: new Date() };
+    const service = { id, name, description, amountMinor: null, currency: null, active: true, catalogVisible: true, createdAt: new Date() };
     try { await db.collection('services').insertOne(service); } catch (error) { if (error.code === 11000) return res.status(409).json({ error: 'A service with that name already exists.' }); throw error; }
     res.status(201).json({ id, name, description });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/admin/services/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!/^[a-z0-9-]{2,80}$/.test(id)) return res.status(400).json({ error: 'Invalid service.' });
+    if (typeof req.body?.catalogVisible === 'boolean') {
+      const result = await db.collection('services').updateOne({ id }, { $set: { catalogVisible: req.body.catalogVisible, updatedAt: new Date() } });
+      if (!result.matchedCount) return res.status(404).json({ error: 'Service not found.' });
+      return res.json({ updated: true, catalogVisible: req.body.catalogVisible });
+    }
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+    if (name.length < 2 || name.length > 100) return res.status(400).json({ error: 'Enter a service name between 2 and 100 characters.' });
+    if (description.length > 500) return res.status(400).json({ error: 'Description must be 500 characters or fewer.' });
+    const result = await db.collection('services').findOneAndUpdate({ id }, { $set: { name, description, updatedAt: new Date() } }, { returnDocument: 'after', projection: { _id: 0, id: 1, name: 1, description: 1 } });
+    if (!result) return res.status(404).json({ error: 'Service not found.' });
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/admin/services/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!/^[a-z0-9-]{2,80}$/.test(id)) return res.status(400).json({ error: 'Invalid service.' });
+    const activeQuote = await db.collection('payment_quotes').findOne({ serviceId: id, status: 'open', expiresAt: { $gt: new Date() } }, { projection: { _id: 1 } });
+    if (activeQuote) return res.status(409).json({ error: 'This service has an open payment quote. Wait for it to expire or close the quote before removing the service.' });
+    const result = await db.collection('services').updateOne({ id }, { $set: { catalogVisible: false, updatedAt: new Date() } });
+    if (!result.matchedCount) return res.status(404).json({ error: 'Service not found.' });
+    res.json({ removed: true });
   } catch (error) { next(error); }
 });
 

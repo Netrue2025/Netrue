@@ -137,14 +137,25 @@
 
   async function loadAdminServices() {
     try {
-      const services = await api('/api/admin/services'); serviceList.replaceChildren();
-      for (const service of services) { const row = document.createElement('article'); row.className = 'admin-catalog-row'; const title = document.createElement('strong'); title.textContent = service.name; const note = document.createElement('span'); note.textContent = service.description || 'Available for agreed-price checkout'; row.append(title, note); serviceList.append(row); }
+      const services = await api('/api/admin/service-catalog'); serviceList.replaceChildren();
+      if (!services.length) { const empty = document.createElement('p'); empty.className = 'empty-list'; empty.textContent = 'No services are listed yet. Add one to make it available at checkout.'; serviceList.append(empty); return; }
+      for (const service of services) {
+        const row = document.createElement('article'); row.className = `admin-catalog-row${service.catalogVisible === false ? ' is-archived' : ''}`;
+        const info = document.createElement('div'); info.className = 'admin-catalog-info';
+        const title = document.createElement('strong'); title.textContent = service.name; const note = document.createElement('span'); note.textContent = service.description || 'Available for agreed-price checkout'; info.append(title, note);
+        const actions = document.createElement('div'); actions.className = 'service-row-actions';
+        const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Edit'; edit.addEventListener('click', () => { serviceForm.hidden = false; serviceForm.elements.id.value = service.id; serviceForm.elements.name.value = service.name; serviceForm.elements.description.value = service.description || ''; serviceForm.querySelector('[type="submit"]').textContent = 'Save changes'; serviceForm.elements.name.focus(); });
+        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = service.catalogVisible === false ? 'Restore' : 'Remove'; remove.className = service.catalogVisible === false ? '' : 'payment-deny'; remove.addEventListener('click', async () => { if (service.catalogVisible !== false && !window.confirm(`Remove “${service.name}” from the payment service list?`)) return; remove.disabled = true; try { if (service.catalogVisible === false) await api(`/api/admin/services/${encodeURIComponent(service.id)}`, { method: 'PATCH', body: JSON.stringify({ catalogVisible: true }) }); else await api(`/api/admin/services/${encodeURIComponent(service.id)}`, { method: 'DELETE' }); await loadAdminServices(); } catch (error) { window.alert(error.message); remove.disabled = false; } });
+        actions.append(edit, remove); row.append(info, actions); serviceList.append(row);
+      }
     } catch (error) { serviceList.innerHTML = `<p class="admin-error">${escapeHtml(error.message)}</p>`; }
   }
-  document.querySelector('#new-service-button').addEventListener('click', () => { serviceForm.hidden = !serviceForm.hidden; if (!serviceForm.hidden) serviceForm.elements.name.focus(); });
+  document.querySelector('#new-service-button').addEventListener('click', () => { serviceForm.reset(); serviceForm.elements.id.value = ''; serviceForm.querySelector('[type="submit"]').textContent = 'Save service'; serviceForm.hidden = false; serviceForm.elements.name.focus(); });
+  document.querySelector('#cancel-service-edit').addEventListener('click', () => { serviceForm.reset(); serviceForm.hidden = true; });
   serviceForm.addEventListener('submit', async event => {
     event.preventDefault(); const feedback = document.querySelector('#service-feedback'); const button = serviceForm.querySelector('[type="submit"]'); button.disabled = true; feedback.textContent = 'Saving service…';
-    try { await api('/api/admin/services', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(serviceForm))) }); serviceForm.reset(); serviceForm.hidden = true; feedback.textContent = ''; await loadAdminServices(); }
+    const values = Object.fromEntries(new FormData(serviceForm)); const id = values.id; delete values.id;
+    try { await api(id ? `/api/admin/services/${encodeURIComponent(id)}` : '/api/admin/services', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(values) }); serviceForm.reset(); serviceForm.hidden = true; serviceForm.querySelector('[type="submit"]').textContent = 'Save service'; feedback.textContent = ''; await loadAdminServices(); }
     catch (error) { feedback.textContent = error.message; } finally { button.disabled = false; }
   });
   async function loadPaymentSettings() {
